@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.env
+
+# 行情快照默认本地落盘,不入库(可复现靠 data_snapshot_id + 重新拉取)
+/snapshots/
+*.parquet

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chanlun"
+version = "0.1.0"
+description = "确定性缠论引擎 (deterministic Chan-theory engine) — 模块 1 数据层"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "pyarrow>=12",  # 快照 parquet 落盘
+]
+
+[project.optional-dependencies]
+# 真实行情源 + 交易日历。单元测试不依赖这些(源适配器内惰性 import)。
+sources = [
+    "akshare",
+    "yfinance",
+    "exchange_calendars",
+]
+test = [
+    "pytest>=7",
+]
+
+[tool.setuptools.packages.find]
+include = ["chanlun*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
