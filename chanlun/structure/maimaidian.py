@@ -184,6 +184,7 @@ def detect_second(
         confirm_date=rev.confirm_date, confirm_price=rev.confirm_price,  # ⑤ 完成日=confirm
         executable_price=rev.executable_price,
         related_zhongshu_id=first.related_zhongshu_id,
+        related_beichi_id=first.related_beichi_id,           # 二买承一买的背驰引用
     )
     return mmd
 

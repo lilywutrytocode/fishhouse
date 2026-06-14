@@ -33,7 +33,15 @@ from .structure.lianli import (
     is_any_beichi,
     is_standard_resonance_grade,
 )
-from .structure.maimaidian import BUY, SELL, assign_ids, detect_first
+from .structure.maimaidian import (
+    BUY,
+    SELL,
+    Unit,
+    assign_ids,
+    detect_first,
+    detect_second,
+    detect_third,
+)
 from .structure.xianduan import Pen, build_segments
 from .structure.zhongshu import BI, XIANDUAN, ZUnit, build_zhongshu
 
@@ -139,16 +147,110 @@ def detect_beichis(bi_zhongshu, confirmed_bis, macd, df, *, level, config):
     return out
 
 
+def detect_trend_beichis(bi_zhongshu, confirmed_bis, macd, df, *, level, config):
+    """§7.4 趋势背驰:≥2 同级别中枢且 zs2 在 zs1 之外(同向趋势),比较趋势首/末同向笔。"""
+    out = []
+    for k in range(len(bi_zhongshu) - 1):
+        zs1, zs2 = bi_zhongshu[k], bi_zhongshu[k + 1]
+        if zs2.ZG < zs1.ZD:
+            trend = DOWN
+        elif zs2.ZD > zs1.ZG:
+            trend = UP
+        else:
+            continue
+        # A = 趋势初始同向推动(从头第一个同向笔);C = 趋势末段同向推动(最后一个)
+        a_idx = next((i for i in range(0, zs1.end_unit + 1)
+                      if confirmed_bis[i].direction == trend), None)
+        c_idx = next((i for i in range(len(confirmed_bis) - 1, zs2.start_unit - 1, -1)
+                      if confirmed_bis[i].direction == trend), None)
+        if a_idx is None or c_idx is None or c_idx <= a_idx:
+            continue
+        A, C = confirmed_bis[a_idx], confirmed_bis[c_idx]
+        new_ext = (C.pivot_price < A.pivot_price if trend == DOWN
+                   else C.pivot_price > A.pivot_price)
+        if not new_ext:
+            continue
+        ea, ec = _bi_energy(A, macd), _bi_energy(C, macd)
+        if ea is None or ec is None:
+            continue
+        exe, _live = executable_after(df, C.confirm_date)
+        reset = macd["dif"].loc[A.pivot_date:C.pivot_date].tolist()
+        bc = evaluate_divergence(
+            SegEnergy(area=ea[0], dif_peak=ea[1], direction=trend, id=A.id),
+            SegEnergy(area=ec[0], dif_peak=ec[1], direction=trend, confirmed=True,
+                      makes_new_extreme=new_ext, pivot_date=C.pivot_date,
+                      pivot_price=C.pivot_price, confirm_date=C.confirm_date,
+                      confirm_price=C.confirm_price, executable_price=exe, id=C.id),
+            btype=BeichiType.TREND.value, compare_unit="bi", level=level, config=config,
+            related_zhongshu_id=zs2.id, reset_dif_values=reset)
+        if bc is not None and bc.confirm_date is not None:
+            bc.id = f"beichi_{_LEVEL_CODE.get(level, level)}_t{len(out) + 1:03d}"
+            out.append((bc, zs2, trend))
+    return out
+
+
 def detect_maimaidians(beichi_tuples, *, level):
-    """由背驰 + 中枢识别一买/一卖(确定层)。"""
+    """由背驰 + 中枢识别一买/一卖(趋势→标准、盘整→盘背)。"""
     mmds = []
     for bc, zs, side_dir in beichi_tuples:
         side = BUY if side_dir == DOWN else SELL
         mmd = detect_first(bc, zs, side=side, level=level)
         if mmd is not None:
             mmds.append(mmd)
-    assign_ids(mmds, level=level)
     return mmds
+
+
+def bi_to_unit(b) -> Unit:
+    """已确认笔 → 次级别走势单位(供二买/三买识别)。"""
+    return Unit(
+        direction=b.direction, high=max(b.start_price, b.pivot_price),
+        low=min(b.start_price, b.pivot_price), pivot_date=b.pivot_date,
+        pivot_price=b.pivot_price, confirm_date=b.confirm_date,
+        confirm_price=b.confirm_price, executable_price=b.executable_price,
+        confirmed=b.confirm_date is not None,
+        n_bars=len(b.source_unit_ids) or 5, id=b.id)
+
+
+def detect_second_buys(first_buys, confirmed_bis, *, level):
+    """§8.2 五步:每个已确认一买/一卖后,取其后笔为次级别单位识别二买/二卖。"""
+    out = []
+    for fb in first_buys:
+        if fb.confirm_date is None:
+            continue
+        subs = [bi_to_unit(b) for b in confirmed_bis if b.start_date >= fb.pivot_date]
+        side = fb.side
+        sb = detect_second(fb, subs, side=side, level=level)
+        if sb is not None:
+            out.append(sb)
+    return out
+
+
+def detect_third_buys(bi_zhongshu, confirmed_bis, *, level):
+    """§8.3:笔中枢内向上离开 ZG 的已确认单位(leave)+ 其后反向回试不回(retest)→ 三买。
+
+    离开段常作为中枢末成员把 GG 抬过 ZG;回试段为中枢后第一根反向笔(low > ZG)。
+    """
+    out = []
+    for zs in bi_zhongshu:
+        ri = zs.end_unit + 1
+        if ri >= len(confirmed_bis):
+            continue
+        retest_b = confirmed_bis[ri]
+        if retest_b.direction != DOWN:
+            continue
+        leave_b = None
+        for i in range(zs.end_unit, zs.start_unit - 1, -1):     # 末清离 ZG 的向上单位
+            b = confirmed_bis[i]
+            if b.direction == UP and max(b.start_price, b.pivot_price) > zs.ZG:
+                leave_b = b
+                break
+        if leave_b is None:
+            continue
+        t = detect_third(zs, bi_to_unit(leave_b), bi_to_unit(retest_b),
+                         side=BUY, level=level)
+        if t is not None:
+            out.append(t)
+    return out
 
 
 def build_lianli_single_level(beichi_tuples, *, level):
@@ -183,10 +285,18 @@ def run_pipeline(
     zhongshus = bi_zhongshu + xd_zhongshu
 
     macd = compute_macd(df["close"], config=config)
-    beichi_tuples = detect_beichis(bi_zhongshu, confirmed_bis, macd, df,
-                                   level=level, config=config)
+    cons_tuples = detect_beichis(bi_zhongshu, confirmed_bis, macd, df,
+                                 level=level, config=config)
+    trend_tuples = detect_trend_beichis(bi_zhongshu, confirmed_bis, macd, df,
+                                        level=level, config=config)
+    beichi_tuples = trend_tuples + cons_tuples         # 趋势优先(标准一买)
     beichis = [bc for bc, _z, _s in beichi_tuples]
-    maimaidians = detect_maimaidians(beichi_tuples, level=level)
+
+    first_buys = detect_maimaidians(beichi_tuples, level=level)
+    second_buys = detect_second_buys(first_buys, confirmed_bis, level=level)
+    third_buys = detect_third_buys(bi_zhongshu, confirmed_bis, level=level)
+    maimaidians = first_buys + second_buys + third_buys
+    assign_ids(maimaidians, level=level)
     lianli = build_lianli_single_level(beichi_tuples, level=level)
 
     monitor = []

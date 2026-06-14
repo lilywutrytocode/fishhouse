@@ -92,6 +92,65 @@ def test_segment_executable_filled_from_df():
             assert s.executable_price is not None
 
 
+def make_df_from_points(pts, tz="Asia/Shanghai") -> pd.DataFrame:
+    closes = [pts[0]]
+    for k in range(1, len(pts)):
+        closes += _seg(pts[k - 1], pts[k], 6)
+    d = date(2024, 1, 1)
+    rows = [{"open": c, "high": c + 1, "low": c - 1, "close": c,
+             "volume": 100, "amount": 1.0} for c in closes]
+    df = pd.DataFrame(rows, columns=list(OHLCV_COLUMNS))
+    df.index = pd.DatetimeIndex([pd.Timestamp(d + timedelta(days=i))
+                                 for i in range(len(closes))],
+                                name="date").tz_localize(tz)
+    validate_canonical(df)
+    return df
+
+
+def _signal_objs(df):
+    return run_pipeline(df)["maimaidians"]
+
+
+# ── 趋势背驰一买(≥2 中枢)──────────────────────────────────────────────────
+def test_trend_first_buy_fires():
+    df = make_df_from_points(
+        [100, 80, 92, 82, 90, 81, 88, 62, 72, 64, 70, 63, 71, 58, 64])
+    r = run_pipeline(df)
+    assert any(b.type == BeichiType.TREND.value for b in r["beichis"])  # ≥2 中枢 → 趋势背驰
+    firsts = [m for m in r["maimaidians"] if m.kind == "一买" and m.subkind == "标准"]
+    assert firsts, "应 fire 一买·标准(趋势背驰)"
+    m = firsts[0]
+    assert m.executable_price is not None
+    assert m.confirm_date is not None and m.confirm_date > m.pivot_date
+    assert m.related_zhongshu_id and m.related_beichi_id        # 引用 id 齐全
+
+
+# ── 二买(§8.2 五步)──────────────────────────────────────────────────────
+def test_second_buy_fires():
+    df = make_df_from_points([100, 70, 85, 68, 82, 66, 78, 67, 76])
+    seconds = [m for m in _signal_objs(df) if m.kind == "二买"]
+    assert seconds, "应 fire 二买"
+    m = seconds[0]
+    assert m.status == "confirmed"
+    assert m.executable_price is not None
+    assert m.confirm_date > m.pivot_date
+    assert m.related_zhongshu_id and m.related_beichi_id        # 承一买引用
+
+
+# ── 三买(§8.3 离开/回试 + leave/retest id)───────────────────────────────
+def test_third_buy_fires():
+    df = make_df_from_points([70, 80, 72, 82, 74, 84, 76, 95, 88, 96])
+    thirds = [m for m in _signal_objs(df) if m.kind == "三买"]
+    assert thirds, "应 fire 三买"
+    m = thirds[0]
+    assert m.status == "confirmed"
+    assert m.executable_price is not None
+    assert m.confirm_date > m.pivot_date
+    assert m.related_zhongshu_id                                # 关联中枢
+    assert m.related_leave_unit_id and m.related_retest_unit_id  # leave/retest id 齐全
+    assert m.pivot_price > 0
+
+
 def test_lianli_non_empty_records_daily_beichi():
     # 单级别 CSV(无 30min)→ 跨级别共振信号合规为"无"(§9.3 需 30min 参与);
     # 但 lianli 非空:记录日线背驰档 + 主观 policy。
