@@ -236,12 +236,13 @@ def evaluate_divergence(
 
 # ── §7.4 选段(结构集成层)────────────────────────────────────────────────
 def select_consolidation_ac(units: list, zhongshu) -> tuple[int, int] | None:
-    """盘整背驰:取"最近一组同向 A/C"——进入中枢的同向段 A(start-1)与离开段 C(end+1)。
+    """盘整背驰:取"最近一组同向 A/C"——C=离开中枢的同向段(end+1),
+    A=其前一个同向段(C-2,通常为中枢内最近一次同向摆动)。
 
-    ★ 用实际进入/离开下标,延伸 >3 段也不固定取前三段(§7.4)。
+    ★ 按最近一组同向段配对,延伸 >3 段也不固定取前三段、不靠 start_unit,避免错位(§7.4)。
     """
-    a_idx = zhongshu.start_unit - 1
     c_idx = zhongshu.end_unit + 1
+    a_idx = c_idx - 2
     if a_idx < 0 or c_idx >= len(units):
         return None
     if units[a_idx].direction != units[c_idx].direction:
