@@ -15,6 +15,7 @@ from chanlun.structure.fractal import (
     TOP,
     Fractal,
     dedup_consecutive_same_type,
+    dedupe_same_type_fractals,
     detect_fractals,
 )
 from chanlun.structure.inclusion import process_inclusion
@@ -148,7 +149,7 @@ def test_dedup_three_tops_then_bottom_keeps_highest_top():
     # 顶顶顶(12,15,13)后出底 → 保留最高顶(15),并保留其自身 confirm
     tops = [_fx(TOP, 1, 12), _fx(TOP, 3, 15), _fx(TOP, 5, 13)]
     bottom = _fx(BOTTOM, 7, 4)
-    out = dedup_consecutive_same_type(tops + [bottom])
+    out = dedupe_same_type_fractals(tops + [bottom])
     assert [f.kind for f in out] == [TOP, BOTTOM]
     survivor = out[0]
     assert survivor.pivot_price == 15
@@ -159,7 +160,7 @@ def test_dedup_three_tops_then_bottom_keeps_highest_top():
 
 def test_dedup_tie_keeps_earliest():
     # 同价两顶 → 取最先(mid_k 较小者),只影响 pivot 选择
-    out = dedup_consecutive_same_type([_fx(TOP, 1, 15), _fx(TOP, 3, 15)])
+    out = dedup_consecutive_same_type([_fx(TOP, 1, 15), _fx(TOP, 3, 15)])  # 用别名,锁向后兼容
     assert len(out) == 1
     assert out[0].mid_k == 1
 
@@ -167,7 +168,7 @@ def test_dedup_tie_keeps_earliest():
 def test_dedup_three_bottoms_keeps_lowest():
     bottoms = [_fx(BOTTOM, 1, 6), _fx(BOTTOM, 3, 4), _fx(BOTTOM, 5, 5)]
     top = _fx(TOP, 7, 20)
-    out = dedup_consecutive_same_type(bottoms + [top])
+    out = dedupe_same_type_fractals(bottoms + [top])
     assert [f.kind for f in out] == [BOTTOM, TOP]
     assert out[0].pivot_price == 4 and out[0].mid_k == 3
 

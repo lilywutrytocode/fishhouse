@@ -129,8 +129,12 @@ def _classify(L: MergedK, M: MergedK, R: MergedK) -> str | None:
     return None
 
 
-def dedup_consecutive_same_type(fractals: list[Fractal]) -> list[Fractal]:
+def dedupe_same_type_fractals(fractals: list[Fractal]) -> list[Fractal]:
     """§3.2:把相邻同类分型压成极值代表(顶取最高/底取最低,**同价取最先**)。
+
+    本规则为**模块 3 detect 与模块 4 笔共用**:
+    - :func:`detect_fractals` 把它当防御性安全网调用一次(严格分型通常天然交替,多为空操作);
+    - 模块 4 ``build_bi`` 在笔过滤/顺延去掉中间分型后,必须用它合并暴露出的连续同类。
 
     survivor 保留自身的 ``pivot_*`` 与 ``confirm_*``;tie-break 只影响保留谁,
     绝不提前 confirm_date。
@@ -148,6 +152,10 @@ def dedup_consecutive_same_type(fractals: list[Fractal]) -> list[Fractal]:
         else:
             out.append(f)
     return out
+
+
+# 旧名别名(向后兼容,语义相同)
+dedup_consecutive_same_type = dedupe_same_type_fractals
 
 
 def _right_end_pending(merged: list[MergedK], df: pd.DataFrame,
@@ -199,7 +207,7 @@ def detect_fractals(
         if kind is not None:
             raw.append(_make_fractal(kind, i, merged, df, level))
 
-    result = dedup_consecutive_same_type(raw)
+    result = dedupe_same_type_fractals(raw)
 
     if include_pending:
         pending = _right_end_pending(merged, df, level)
