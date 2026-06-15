@@ -39,11 +39,13 @@ def mk_zhongshu(zd=10.0, zg=14.0, id="zs1"):
 
 
 def mk_beichi(*, btype=BeichiType.TREND.value, pivot=8.0, confirm=12.0,
-              status=BeichiStatus.CONFIRMED.value, id="bc1"):
+              status=BeichiStatus.CONFIRMED.value, grade="标准背驰",
+              is_main_signal=True, id="bc1"):
     return SimpleNamespace(
         type=btype, pivot_date=_d(5), pivot_price=pivot,
         beichi_status=status, confirm_date=_d(7) if confirm is not None else None,
-        confirm_price=confirm, executable_price=confirm, id=id,
+        confirm_price=confirm, executable_price=confirm,
+        grade=grade, is_main_signal=is_main_signal, id=id,
     )
 
 
@@ -81,6 +83,36 @@ def test_first_buy_pivot_below_but_confirm_inside():
     assert mmd.confirm_relation_to_zhongshu == INSIDE
     assert mmd.status == ST_BEICHI
     assert mmd.confirm_date > mmd.pivot_date
+
+
+# ── §8.1 强度档闸:标准档→主信号;面积/DIF 弱档→一买·弱、不进主信号 ──────────
+def test_first_buy_standard_grade_is_main():
+    zs = mk_zhongshu()
+    mmd = detect_first(mk_beichi(grade="标准背驰", is_main_signal=True), zs)
+    assert mmd.strength == "标准" and mmd.is_main is True
+    assert mmd.beichi_grade == "标准背驰"
+    assert mmd.label == "一买·标准"          # 趋势 + 标准档
+
+
+def test_first_buy_weak_grade_marks_weak_not_main():
+    zs = mk_zhongshu()
+    # 趋势背驰但只落 DIF 档(弱)→ 一买·弱,不进主信号;子类(趋势→标准)正交保留
+    bc = mk_beichi(btype=BeichiType.TREND.value, grade="DIF背驰", is_main_signal=False)
+    mmd = detect_first(bc, zs)
+    assert mmd.subkind == SUB_STANDARD       # 趋势子类仍记录(与强度正交)
+    assert mmd.strength == "弱"
+    assert mmd.is_main is False
+    assert mmd.label == "一买·弱"             # 标 一买·弱,而非 一买·标准
+    assert mmd.label != "一买·标准"
+
+
+def test_first_buy_area_grade_also_weak():
+    zs = mk_zhongshu()
+    bc = mk_beichi(btype=BeichiType.CONSOLIDATION.value, grade="面积背驰",
+                   is_main_signal=False)
+    mmd = detect_first(bc, zs)
+    assert mmd.strength == "弱" and mmd.is_main is False
+    assert mmd.label == "一买·弱"             # 盘整弱档也标 弱
 
 
 def test_first_buy_pending_when_beichi_not_confirmed():

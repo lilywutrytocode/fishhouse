@@ -24,7 +24,7 @@ from enum import Enum
 
 import pandas as pd
 
-from .beichi import BeichiStatus, BeichiType
+from .beichi import BeichiStatus, BeichiType, Grade
 from .inclusion import DOWN, UP
 
 
@@ -79,7 +79,7 @@ class MaiMaiDian:
     side: str                # buy / sell
     level: str
     status: str              # confirmed/背驰确认/次级别确认/待确认
-    subkind: str | None      # 标准/盘背(仅一买)
+    subkind: str | None      # 标准(趋势)/盘背(盘整)——子类,与强度档正交(仅一买/一卖)
     pivot_date: pd.Timestamp
     pivot_price: float
     confirm_date: pd.Timestamp | None
@@ -93,6 +93,10 @@ class MaiMaiDian:
     related_retest_unit_id: str | None = None
     overlap_2_3: bool = False
     supporting_signals: list = field(default_factory=list)
+    # §8.1 强度档闸(对齐 §7.2):背驰档透传 + 主信号判定(与 subkind 正交)
+    beichi_grade: str | None = None     # 标准背驰/面积背驰/DIF背驰
+    strength: str | None = None         # 标准(建立在标准档背驰)/ 弱(仅面积/DIF档)
+    is_main: bool = False               # 仅标准档背驰之上的一买为主买点
     id: str | None = None
 
     def __post_init__(self):
@@ -100,6 +104,15 @@ class MaiMaiDian:
             assert self.confirm_date > self.pivot_date, (
                 "confirm_date 必须晚于 pivot_date(§0.5 买卖点右侧确认)"
             )
+
+    @property
+    def label(self) -> str:
+        """显示标签:弱一买/卖标 ``一买·弱``;否则 ``一买·{子类}``。"""
+        if self.kind in ("一买", "一卖") and self.strength == "弱":
+            return f"{self.kind}·弱"
+        if self.subkind:
+            return f"{self.kind}·{self.subkind}"
+        return self.kind
 
 
 def relation_to_zhongshu(price: float, zd: float, zg: float) -> str:
@@ -137,6 +150,11 @@ def detect_first(
         status = ST_PENDING
         confirm_date = confirm_price = executable = None
 
+    # §8.1 强度档闸:主一买须建立在标准档背驰之上;面积/DIF 弱档 → 一买·弱(不进主信号)
+    beichi_grade = getattr(beichi, "grade", None)
+    is_main = bool(getattr(beichi, "is_main_signal", False))   # 标准档 + 背驰 confirmed
+    strength = "标准" if beichi_grade == Grade.STANDARD.value else "弱"
+
     confirm_rel = (relation_to_zhongshu(confirm_price, zhongshu.ZD, zhongshu.ZG)
                    if confirm_price is not None else None)
     mmd = MaiMaiDian(
@@ -146,6 +164,7 @@ def detect_first(
         pivot_relation_to_zhongshu=relation_to_zhongshu(pivot_price, zhongshu.ZD, zhongshu.ZG),
         confirm_relation_to_zhongshu=confirm_rel,
         related_zhongshu_id=zhongshu.id, related_beichi_id=beichi.id,
+        beichi_grade=beichi_grade, strength=strength, is_main=is_main,
     )
     return mmd
 

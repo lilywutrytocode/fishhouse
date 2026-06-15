@@ -118,11 +118,43 @@ def test_trend_first_buy_fires():
     r = run_pipeline(df)
     assert any(b.type == BeichiType.TREND.value for b in r["beichis"])  # ≥2 中枢 → 趋势背驰
     firsts = [m for m in r["maimaidians"] if m.kind == "一买" and m.subkind == "标准"]
-    assert firsts, "应 fire 一买·标准(趋势背驰)"
+    assert firsts, "应 fire 趋势子类一买"
     m = firsts[0]
     assert m.executable_price is not None
     assert m.confirm_date is not None and m.confirm_date > m.pivot_date
     assert m.related_zhongshu_id and m.related_beichi_id        # 引用 id 齐全
+
+
+# ── §8.1 强度档闸:弱档(面积/DIF)趋势背驰 → 一买·弱、不进主信号 ──────────────
+def test_weak_trend_beichi_marks_first_buy_weak():
+    df = make_df_from_points(
+        [100, 80, 92, 82, 90, 81, 88, 62, 72, 64, 70, 63, 71, 58, 64])
+    r = run_pipeline(df)
+    trend_bcs = [b for b in r["beichis"] if b.type == BeichiType.TREND.value]
+    assert trend_bcs
+    tb = trend_bcs[0]
+    assert tb.grade in (Grade.AREA.value, Grade.DIF.value)      # 仅面积/DIF 档(弱)
+    assert tb.is_main_signal is False                          # 弱档背驰非主信号
+    weak = [m for m in r["maimaidians"]
+            if m.kind == "一买" and m.related_beichi_id == tb.id]
+    assert weak, "弱档趋势背驰应仍产出一买(标弱)"
+    m = weak[0]
+    assert m.strength == "弱"                                   # 标 弱
+    assert m.is_main is False                                   # ★ 不进主信号
+    assert m.label == "一买·弱" and m.label != "一买·标准"
+    assert m.subkind == "标准"                                  # 趋势子类正交保留
+
+
+def test_consolidation_first_buy_is_main_when_standard_grade():
+    # 对照:盘整标准背驰 → 一买·盘背、主信号
+    df = make_divergence_df()
+    r = run_pipeline(df)
+    firsts = [m for m in r["maimaidians"] if m.kind == "一买"]
+    assert firsts
+    m = firsts[0]
+    assert m.beichi_grade == Grade.STANDARD.value
+    assert m.strength == "标准" and m.is_main is True
+    assert m.label == "一买·盘背"
 
 
 # ── 二买(§8.2 五步)──────────────────────────────────────────────────────
