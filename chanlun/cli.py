@@ -273,14 +273,25 @@ def _level_structures(df: pd.DataFrame, *, level: str, config: Config) -> dict:
                                  level=level, kind=XIANDUAN)
     zhongshus = bi_zhongshu + xd_zhongshu
 
-    macd = compute_macd(df["close"], config=config)
+    macd = compute_macd(df["close"], config=config)   # ★ 引擎自算 MACD(§1.4),不用文件自带
     cons = detect_beichis(bi_zhongshu, confirmed_bis, macd, df, level=level, config=config)
     trend = detect_trend_beichis(bi_zhongshu, confirmed_bis, macd, df,
                                  level=level, config=config)
+
+    # §7.1 MACD 暖机守卫:前 warmup 根为 EMA 暖机区,不发背驰(C 段落在暖机区者剔除)
+    warmup = config.macd_warmup_bars()
+
+    def _pos(dt):
+        try:
+            return df.index.get_loc(dt)
+        except KeyError:
+            return len(df)
+
+    beichi_tuples = [t for t in (trend + cons) if _pos(t[0].confirm_date) >= warmup]
     return {
         "bis": bis, "segments": segments, "zhongshus": zhongshus,
         "bi_zhongshu": bi_zhongshu, "confirmed_bis": confirmed_bis,
-        "beichi_tuples": trend + cons,                 # 趋势优先(标准一买)
+        "beichi_tuples": beichi_tuples,                # 趋势优先(标准一买)
     }
 
 
@@ -317,6 +328,20 @@ def run_pipeline(
     second_buys = detect_second_buys(first_buys, d["confirmed_bis"], level=level)
     third_buys = detect_third_buys(d["bi_zhongshu"], d["confirmed_bis"], level=level)
     maimaidians = first_buys + second_buys + third_buys
+
+    # §7.1 暖机守卫:confirm 落在暖机区的买卖点不发(右端未确认 confirm_date=None 保留)
+    warmup = config.macd_warmup_bars()
+    cutoff_date = df.index[warmup].isoformat() if len(df) > warmup else None
+
+    def _confirm_in_warmup(m):
+        if m.confirm_date is None:
+            return False
+        try:
+            return df.index.get_loc(m.confirm_date) < warmup
+        except KeyError:
+            return False
+
+    maimaidians = [m for m in maimaidians if not _confirm_in_warmup(m)]
     assign_ids(maimaidians, level=level)
 
     # §1.9 周线由日线合成 + §9.3 日-周联立(30min 先留空接口)
@@ -339,10 +364,19 @@ def run_pipeline(
         monitor = derive_monitor_levels(current_price=current, zhongshu=latest_zs,
                                         recent_first_buy_low=first_buy_low)
 
+    macd_warmup = {
+        "bars": warmup,
+        "cutoff_date": cutoff_date,                    # analysis_start_date ≥ 此日
+        "analysis_start_date": cutoff_date,
+        "fully_in_warmup": len(df) <= warmup,
+        "note": (f"前 {warmup} 根为 EMA 暖机区(MACD_WARMUP·低置信);"
+                 "该区间不发背驰/买卖点"),
+    }
     return {
         "bis": d["bis"], "segments": d["segments"], "zhongshus": d["zhongshus"],
         "beichis": beichis, "maimaidians": maimaidians, "lianli": lianli,
         "monitor": monitor, "weekly_beichis": weekly_beichis,
+        "macd_warmup": macd_warmup,
     }
 
 
@@ -353,11 +387,13 @@ def analyze(
 ) -> dict:
     """规范 OHLCV → §11.1 输出 dict(完整链路 + executable_price)。"""
     r = run_pipeline(df, level=level, config=config)
-    return build_output(
+    out = build_output(
         symbol=symbol, level=level, data_health=data_health, snapshot_meta=snapshot_meta,
         bi=r["bis"], xianduan=r["segments"], zhongshu=r["zhongshus"],
         beichi=r["beichis"], mai_mai_dian=r["maimaidians"], lianli=r["lianli"],
         monitor_levels=r["monitor"], config=config)
+    out["macd_warmup"] = r["macd_warmup"]              # §7.1 暖机区标注
+    return out
 
 
 def format_report(output: dict) -> str:
@@ -370,6 +406,11 @@ def format_report(output: dict) -> str:
         f"中枢: {len(output['zhongshu'])}  背驰: {len(output['beichi'])}  "
         f"买卖点: {len(output['mai_mai_dian'])}",
     ]
+    mw = output.get("macd_warmup")
+    if mw:
+        lines.append(f"MACD 暖机区: 前 {mw['bars']} 根(截至 {mw['cutoff_date']})"
+                     f" MACD_WARMUP·低置信,不发背驰/买卖点"
+                     + ("  ⚠ 全程在暖机区" if mw["fully_in_warmup"] else ""))
     pending_bi = [b for b in output["bi"] if b.get("status") == "forming"]
     pending_xd = [s for s in output["xianduan"] if s.get("state") != "CONFIRMED_END"]
     if pending_bi:

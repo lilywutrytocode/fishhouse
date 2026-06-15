@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from chanlun.cli import analyze, run_pipeline
+from chanlun.config import Config
 from chanlun.data.models import OHLCV_COLUMNS, validate_canonical
 from chanlun.data.weekly import synthesize_weekly
 from chanlun.output import output_schema_complete
@@ -23,6 +24,10 @@ from tests.conftest import weekdays
 
 def _seg(a, b, n):
     return list(np.linspace(a, b, n + 1))[1:]
+
+
+# 信号逻辑测试用:关闭 MACD 暖机守卫(暖机守卫另有专测)
+NO_WARMUP = Config(macd_warmup_factor=0)
 
 
 def make_divergence_df(tz="Asia/Shanghai") -> pd.DataFrame:
@@ -44,7 +49,7 @@ def make_divergence_df(tz="Asia/Shanghai") -> pd.DataFrame:
 
 def test_end_to_end_produces_signals():
     df = make_divergence_df()
-    out = analyze(df, symbol="TEST", level="daily")
+    out = analyze(df, symbol="TEST", level="daily", config=NO_WARMUP)
     assert output_schema_complete(out)
     # 不再占位空:背驰 / 买卖点 / 联立 均非空
     assert len(out["beichi"]) >= 1
@@ -54,7 +59,7 @@ def test_end_to_end_produces_signals():
 
 def test_signals_have_executable_filled():
     df = make_divergence_df()
-    out = analyze(df, symbol="TEST")
+    out = analyze(df, symbol="TEST", config=NO_WARMUP)
     confirmed = [m for m in out["mai_mai_dian"] if m["confirm_date"] is not None]
     assert confirmed, "应产出至少一个已确认买卖点"
     for m in confirmed:
@@ -64,7 +69,7 @@ def test_signals_have_executable_filled():
 
 def test_beichi_is_standard_consolidation_with_executable():
     df = make_divergence_df()
-    r = run_pipeline(df)
+    r = run_pipeline(df, config=NO_WARMUP)
     bc = r["beichis"][0]
     assert bc.type == BeichiType.CONSOLIDATION.value     # 盘整背驰
     assert bc.grade == Grade.STANDARD.value              # 面积↓且 DIF↓ → 标准档
@@ -74,7 +79,7 @@ def test_beichi_is_standard_consolidation_with_executable():
 
 def test_backtest_triggers_use_confirm_executable_not_pivot():
     df = make_divergence_df()
-    r = run_pipeline(df)
+    r = run_pipeline(df, config=NO_WARMUP)
     events = [to_signal_event(m) for m in r["maimaidians"]]
     triggers = to_backtest_triggers(events)
     assert len(triggers) >= 1
@@ -86,7 +91,7 @@ def test_backtest_triggers_use_confirm_executable_not_pivot():
 
 def test_segment_executable_filled_from_df():
     df = make_divergence_df()
-    r = run_pipeline(df)
+    r = run_pipeline(df, config=NO_WARMUP)
     confirmed_segs = [s for s in r["segments"]
                       if s.state == "CONFIRMED_END" and s.confirm_date is not None]
     for s in confirmed_segs:
@@ -110,14 +115,14 @@ def make_df_from_points(pts, leg=6, tz="Asia/Shanghai") -> pd.DataFrame:
 
 
 def _signal_objs(df):
-    return run_pipeline(df)["maimaidians"]
+    return run_pipeline(df, config=NO_WARMUP)["maimaidians"]
 
 
 # ── 趋势背驰一买(≥2 中枢)──────────────────────────────────────────────────
 def test_trend_first_buy_fires():
     df = make_df_from_points(
         [100, 80, 92, 82, 90, 81, 88, 62, 72, 64, 70, 63, 71, 58, 64])
-    r = run_pipeline(df)
+    r = run_pipeline(df, config=NO_WARMUP)
     assert any(b.type == BeichiType.TREND.value for b in r["beichis"])  # ≥2 中枢 → 趋势背驰
     firsts = [m for m in r["maimaidians"] if m.kind == "一买" and m.subkind == "标准"]
     assert firsts, "应 fire 趋势子类一买"
@@ -131,7 +136,7 @@ def test_trend_first_buy_fires():
 def test_weak_trend_beichi_marks_first_buy_weak():
     df = make_df_from_points(
         [100, 80, 92, 82, 90, 81, 88, 62, 72, 64, 70, 63, 71, 58, 64])
-    r = run_pipeline(df)
+    r = run_pipeline(df, config=NO_WARMUP)
     trend_bcs = [b for b in r["beichis"] if b.type == BeichiType.TREND.value]
     assert trend_bcs
     tb = trend_bcs[0]
@@ -150,7 +155,7 @@ def test_weak_trend_beichi_marks_first_buy_weak():
 def test_consolidation_first_buy_is_main_when_standard_grade():
     # 对照:盘整标准背驰 → 一买·盘背、主信号
     df = make_divergence_df()
-    r = run_pipeline(df)
+    r = run_pipeline(df, config=NO_WARMUP)
     firsts = [m for m in r["maimaidians"] if m.kind == "一买"]
     assert firsts
     m = firsts[0]
@@ -191,7 +196,7 @@ def test_daily_weekly_resonance_pending_30min():
     df = make_df_from_points([100, 68, 84, 66, 80, 64, 76, 63, 72], leg=20)
     wdf = synthesize_weekly(df)
     assert len(wdf) >= 20                               # 周线由日线合成且足量
-    r = run_pipeline(df)
+    r = run_pipeline(df, config=NO_WARMUP)
     assert any(b.is_main_signal for b in r["beichis"])          # 日线标准背驰
     assert any(b.is_main_signal for b in r["weekly_beichis"])   # 周线标准背驰
     li = r["lianli"]
@@ -240,7 +245,7 @@ def test_weekly_synthesized_from_daily_anchored_friday():
 def test_daily_only_beichi_is_level_turn_not_resonance():
     # ② 只有日线标准背驰、周线无背驰 → 本级别转折成立(而非共振)
     df = make_divergence_df()                          # 短日线 → 合成周线不足以成背驰
-    r = run_pipeline(df)
+    r = run_pipeline(df, config=NO_WARMUP)
     assert not any(b.is_main_signal for b in r["weekly_beichis"])  # 周线无主背驰
     li = r["lianli"]
     assert li is not None

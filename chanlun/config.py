@@ -80,9 +80,17 @@ class Config:
     # §1.7 历史充足度:可得 bar < short_history_factor × 长度下限 → SHORT_HISTORY
     short_history_factor: float = 1.5
 
+    # §7.1 ★ MACD EMA 暖机:每级别前 macd_warmup_factor × macd_slow 根为暖机区,
+    # 不发背驰/买卖点(标 MACD_WARMUP·低置信);analysis_start_date ≥ source_start + 该根数。
+    macd_warmup_factor: int = 5
+
     # §1.7 缺失判定
     missing_consecutive_reject: int = 3   # 连续缺 ≥ 3 交易日 → REJECT
     missing_rate_reject: float = 0.05      # 总缺失率 > 5% → REJECT
+
+    def macd_warmup_bars(self) -> int:
+        """EMA 暖机根数 = factor × macd_slow(默认 5×26 = 130)。"""
+        return self.macd_warmup_factor * self.macd_slow
 
     def min_length_for(self, level: str) -> int | None:
         """返回级别对应的长度下限。未知级别返回 None(不做长度判定)。"""
