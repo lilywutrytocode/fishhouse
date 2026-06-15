@@ -13,9 +13,12 @@ import pandas as pd
 
 from chanlun.cli import analyze, run_pipeline
 from chanlun.data.models import OHLCV_COLUMNS, validate_canonical
+from chanlun.data.weekly import synthesize_weekly
 from chanlun.output import output_schema_complete
 from chanlun.probability import to_backtest_triggers, to_signal_event
 from chanlun.structure.beichi import BeichiType, Grade
+from chanlun.structure.lianli import StructureSignal
+from tests.conftest import weekdays
 
 
 def _seg(a, b, n):
@@ -92,16 +95,15 @@ def test_segment_executable_filled_from_df():
             assert s.executable_price is not None
 
 
-def make_df_from_points(pts, tz="Asia/Shanghai") -> pd.DataFrame:
+def make_df_from_points(pts, leg=6, tz="Asia/Shanghai") -> pd.DataFrame:
     closes = [pts[0]]
     for k in range(1, len(pts)):
-        closes += _seg(pts[k - 1], pts[k], 6)
-    d = date(2024, 1, 1)
+        closes += _seg(pts[k - 1], pts[k], leg)
+    days = weekdays(date(2020, 1, 6), len(closes))
     rows = [{"open": c, "high": c + 1, "low": c - 1, "close": c,
              "volume": 100, "amount": 1.0} for c in closes]
     df = pd.DataFrame(rows, columns=list(OHLCV_COLUMNS))
-    df.index = pd.DatetimeIndex([pd.Timestamp(d + timedelta(days=i))
-                                 for i in range(len(closes))],
+    df.index = pd.DatetimeIndex([pd.Timestamp(d) for d in days],
                                 name="date").tz_localize(tz)
     validate_canonical(df)
     return df
@@ -183,13 +185,53 @@ def test_third_buy_fires():
     assert m.pivot_price > 0
 
 
-def test_lianli_non_empty_records_daily_beichi():
-    # 单级别 CSV(无 30min)→ 跨级别共振信号合规为"无"(§9.3 需 30min 参与);
-    # 但 lianli 非空:记录日线背驰档 + 主观 policy。
-    df = make_divergence_df()
-    out = analyze(df, symbol="TEST")
-    li = out["lianli"]
+# ── ① 日-周同向标准背驰 → 共振背驰,policy 最高强度 ─────────────────────────
+def test_daily_weekly_resonance():
+    # 长日线下跌(低点递低、跌势减弱),合成周线后日/周同向标准背驰共振
+    df = make_df_from_points([100, 68, 84, 66, 80, 64, 76, 63, 72], leg=20)
+    wdf = synthesize_weekly(df)
+    assert len(wdf) >= 20                               # 周线由日线合成且足量
+    r = run_pipeline(df)
+    assert any(b.is_main_signal for b in r["beichis"])          # 日线标准背驰
+    assert any(b.is_main_signal for b in r["weekly_beichis"])   # 周线标准背驰
+    li = r["lianli"]
+    assert li.structure_signal == StructureSignal.RESONANCE.value   # 共振背驰
+    assert li.policy.tier == "最高强度"                 # policy 最高强度档
+    assert li.policy.stance == "strong_add"            # 底 → 重仓建仓
+    # ★ 只用标准档参与共振:三级背驰状态记录日/周档,30min 留空
+    assert li.level_beichi["daily"] == "标准背驰"
+    assert li.level_beichi["min30"] is None
+
+
+def test_weekly_synthesized_from_daily_anchored_friday():
+    df = make_df_from_points([100, 68, 84, 66, 80, 64, 76, 63, 72], leg=20)
+    wdf = synthesize_weekly(df)
+    assert wdf.index[0].weekday() == 4                  # §1.9 锚定周五
+    validate_canonical(wdf)
+
+
+def test_daily_only_beichi_is_level_turn_not_resonance():
+    # ② 只有日线标准背驰、周线无背驰 → 本级别转折成立(而非共振)
+    df = make_divergence_df()                          # 短日线 → 合成周线不足以成背驰
+    r = run_pipeline(df)
+    assert not any(b.is_main_signal for b in r["weekly_beichis"])  # 周线无主背驰
+    li = r["lianli"]
     assert li is not None
-    assert li["level_beichi"]["daily"] == "标准背驰"     # 日线档已记录
-    assert li["structure_signal"] == "无"               # 缺 30min → 无最高强度共振
-    assert "policy" in li and "tier" in li["policy"]
+    assert li.structure_signal == StructureSignal.LEVEL_TURN.value  # 本级别转折成立
+    assert li.structure_signal != StructureSignal.RESONANCE.value
+    assert li.policy.tier != "最高强度"               # 非最高强度
+
+
+def test_policy_filters_weak_signal_no_main_action():
+    # policy 层统一按 is_main 过滤:仅弱背驰背景(非主信号)→ 不进任何主信号动作
+    from types import SimpleNamespace
+
+    from chanlun.cli import build_lianli_two_level
+    from chanlun.structure.inclusion import DOWN
+
+    weak = SimpleNamespace(grade="面积背驰", beichi_status="confirmed",
+                           is_main_signal=False, id="bc")
+    li = build_lianli_two_level([(weak, None, DOWN)], [], level="daily")
+    assert li.structure_signal == StructureSignal.NONE.value
+    assert li.policy.tier != "最高强度"
+    assert li.policy.stance == "hold"                  # 弱信号 → 观望,无主动作

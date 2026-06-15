@@ -14,6 +14,7 @@ import sys
 import pandas as pd
 
 from .config import DEFAULT_CONFIG, Config, market_of
+from .data.weekly import synthesize_weekly
 from .monitor import derive_monitor_levels
 from .output import build_output, to_json
 from .structure.beichi import (
@@ -253,20 +254,8 @@ def detect_third_buys(bi_zhongshu, confirmed_bis, *, level):
     return out
 
 
-def build_lianli_single_level(beichi_tuples, *, level):
-    """单级别(本 CSV)联立:仅日线档位有数据 → 本级别转折/无。"""
-    if not beichi_tuples:
-        return None
-    bc, _zs, side_dir = beichi_tuples[0]
-    return build_lianli(
-        daily_beichi=bc, min30_is_approx=False,
-        side="bottom" if side_dir == DOWN else "top")
-
-
-def run_pipeline(
-    df: pd.DataFrame, *, level: str = "daily", config: Config = DEFAULT_CONFIG,
-) -> dict:
-    """跑完整结构链路,返回**原始结构对象**(供输出层与测试使用)。"""
+def _level_structures(df: pd.DataFrame, *, level: str, config: Config) -> dict:
+    """单级别结构链路:包含→分型→笔→线段→中枢→背驰(趋势+盘整)。"""
     merged = process_inclusion(df)
     fractals = detect_fractals(merged, df, level=level)
     bis = build_bi(fractals, merged, level=level)
@@ -285,33 +274,75 @@ def run_pipeline(
     zhongshus = bi_zhongshu + xd_zhongshu
 
     macd = compute_macd(df["close"], config=config)
-    cons_tuples = detect_beichis(bi_zhongshu, confirmed_bis, macd, df,
+    cons = detect_beichis(bi_zhongshu, confirmed_bis, macd, df, level=level, config=config)
+    trend = detect_trend_beichis(bi_zhongshu, confirmed_bis, macd, df,
                                  level=level, config=config)
-    trend_tuples = detect_trend_beichis(bi_zhongshu, confirmed_bis, macd, df,
-                                        level=level, config=config)
-    beichi_tuples = trend_tuples + cons_tuples         # 趋势优先(标准一买)
+    return {
+        "bis": bis, "segments": segments, "zhongshus": zhongshus,
+        "bi_zhongshu": bi_zhongshu, "confirmed_bis": confirmed_bis,
+        "beichi_tuples": trend + cons,                 # 趋势优先(标准一买)
+    }
+
+
+def build_lianli_two_level(daily_tuples, weekly_tuples, *, level):
+    """§9.3 日-周两级联立:取日线主背驰(标准 is_main)+ 同向周线主背驰 → 共振/转折。
+
+    ★ policy 按 is_main 过滤:无日线主背驰(仅弱信号)→ 不进任何主信号动作(structure_signal=无)。
+    """
+    daily_main = next(((bc, side) for bc, _z, side in daily_tuples
+                       if bc.is_main_signal), None)
+    if daily_main is None:
+        if not daily_tuples:
+            return None
+        bc, _z, side = daily_tuples[0]                  # 仅弱背驰背景 → 无主信号
+        return build_lianli(daily_beichi=bc,
+                            side="bottom" if side == DOWN else "top")
+    d_bc, d_side = daily_main
+    w_bc = next((bc for bc, _z, side in weekly_tuples
+                 if bc.is_main_signal and side == d_side), None)
+    return build_lianli(daily_beichi=d_bc, weekly_beichi=w_bc,
+                        side="bottom" if d_side == DOWN else "top")
+
+
+def run_pipeline(
+    df: pd.DataFrame, *, level: str = "daily", config: Config = DEFAULT_CONFIG,
+    weekly_df: pd.DataFrame | None = None,
+) -> dict:
+    """跑完整结构链路 + 日-周联立,返回**原始结构对象**(供输出层与测试使用)。"""
+    d = _level_structures(df, level=level, config=config)
+    beichi_tuples = d["beichi_tuples"]
     beichis = [bc for bc, _z, _s in beichi_tuples]
 
     first_buys = detect_maimaidians(beichi_tuples, level=level)
-    second_buys = detect_second_buys(first_buys, confirmed_bis, level=level)
-    third_buys = detect_third_buys(bi_zhongshu, confirmed_bis, level=level)
+    second_buys = detect_second_buys(first_buys, d["confirmed_bis"], level=level)
+    third_buys = detect_third_buys(d["bi_zhongshu"], d["confirmed_bis"], level=level)
     maimaidians = first_buys + second_buys + third_buys
     assign_ids(maimaidians, level=level)
-    lianli = build_lianli_single_level(beichi_tuples, level=level)
+
+    # §1.9 周线由日线合成 + §9.3 日-周联立(30min 先留空接口)
+    weekly_tuples = []
+    weekly_beichis = []
+    if level == "daily":
+        wdf = weekly_df if weekly_df is not None else synthesize_weekly(df)
+        if len(wdf) >= 5:
+            w = _level_structures(wdf, level="weekly", config=config)
+            weekly_tuples = w["beichi_tuples"]
+            weekly_beichis = [bc for bc, _z, _s in weekly_tuples]
+    lianli = build_lianli_two_level(beichi_tuples, weekly_tuples, level=level)
 
     monitor = []
     if len(df):
         current = float(df["close"].iloc[-1])
-        latest_zs = zhongshus[-1] if zhongshus else None
+        latest_zs = d["zhongshus"][-1] if d["zhongshus"] else None
         first_buy_low = next((m.pivot_price for m in maimaidians
                               if m.kind == "一买"), None)
         monitor = derive_monitor_levels(current_price=current, zhongshu=latest_zs,
                                         recent_first_buy_low=first_buy_low)
 
     return {
-        "bis": bis, "segments": segments, "zhongshus": zhongshus,
+        "bis": d["bis"], "segments": d["segments"], "zhongshus": d["zhongshus"],
         "beichis": beichis, "maimaidians": maimaidians, "lianli": lianli,
-        "monitor": monitor,
+        "monitor": monitor, "weekly_beichis": weekly_beichis,
     }
 
 

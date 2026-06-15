@@ -62,14 +62,24 @@ def classify_lianli(
     min30_confirm: bool = False,
     min30_is_approx: bool = False,
     daily_continuation_failed: bool = False,
+    min30_available: bool = True,
 ) -> StructureSignal:
     """按 §9.3 表判联立结构信号。
 
     ★ ``min30_is_approx``(30min 用日线内部近似)时,三标准齐备也只出 ``降级共振``,
     绝不进 ``共振背驰`` 最高强度。
+    ★ ``min30_available=False``(30min 留空接口,日-周两级):**仅标准档参与**——
+    日+周标准背驰 → 共振背驰;仅日标准背驰 → 本级别转折成立;否则无(弱信号不进主动作)。
     """
     if daily_continuation_failed:                     # 背驰后未反向、盘整顺原向
         return StructureSignal.SMALL_TO_BIG
+    if not min30_available:
+        # 日-周两级联立(30min 先留空):只用标准档,弱信号不进任何主信号
+        if weekly_standard and daily_standard:
+            return StructureSignal.RESONANCE
+        if daily_standard:
+            return StructureSignal.LEVEL_TURN
+        return StructureSignal.NONE
     if weekly_standard and daily_standard and min30_standard:
         # ★ 30min 近似 → 降级共振;真 30min → 共振背驰
         return (StructureSignal.DOWNGRADED if min30_is_approx
@@ -242,6 +252,7 @@ def build_lianli(
         min30_any=is_any_beichi(min30_beichi),
         min30_is_approx=min30_is_approx,
         daily_continuation_failed=daily_continuation_failed,
+        min30_available=(min30_beichi is not None),
     )
     policy = map_policy(signal, side=side)
     divergence = compare_review(policy, review) if review is not None else None
