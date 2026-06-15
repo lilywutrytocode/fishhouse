@@ -185,9 +185,9 @@ def test_third_buy_fires():
     assert m.pivot_price > 0
 
 
-# ── ① 日-周同向标准背驰 → 共振背驰,policy 最高强度 ─────────────────────────
-def test_daily_weekly_resonance():
-    # 长日线下跌(低点递低、跌势减弱),合成周线后日/周同向标准背驰共振
+# ── ① 日+周标准背驰 + 30min 缺失 → 日周共振·待30min,降一档(降级隔离)─────────
+def test_daily_weekly_resonance_pending_30min():
+    # 长日线下跌(低点递低、跌势减弱),合成周线后日/周同向标准背驰;30min 缺失 → 不顶格
     df = make_df_from_points([100, 68, 84, 66, 80, 64, 76, 63, 72], leg=20)
     wdf = synthesize_weekly(df)
     assert len(wdf) >= 20                               # 周线由日线合成且足量
@@ -195,12 +195,39 @@ def test_daily_weekly_resonance():
     assert any(b.is_main_signal for b in r["beichis"])          # 日线标准背驰
     assert any(b.is_main_signal for b in r["weekly_beichis"])   # 周线标准背驰
     li = r["lianli"]
-    assert li.structure_signal == StructureSignal.RESONANCE.value   # 共振背驰
-    assert li.policy.tier == "最高强度"                 # policy 最高强度档
-    assert li.policy.stance == "strong_add"            # 底 → 重仓建仓
-    # ★ 只用标准档参与共振:三级背驰状态记录日/周档,30min 留空
+    # ★ 30min 缺失 → 不得判共振·最高强度;降为 日周共振·待30min、降一档
+    assert li.structure_signal == StructureSignal.PENDING_30MIN.value
+    assert li.structure_signal != StructureSignal.RESONANCE.value
+    assert li.policy.tier == "降一档"
+    assert li.policy.stance == "add"                   # 底 → 分批不重仓(非 strong_add)
+    assert "不重仓" in li.policy.action
+    assert li.downgraded is True
+    assert li.min30_status == "缺失"
     assert li.level_beichi["daily"] == "标准背驰"
     assert li.level_beichi["min30"] is None
+
+
+def test_three_level_real_30min_gives_top_resonance():
+    # 顶格只在三级齐全(真 30min)时出现:周+日+真 30min 标准背驰 → 共振·最高强度
+    from types import SimpleNamespace
+
+    from chanlun.structure.lianli import build_lianli
+    bc = SimpleNamespace(grade="标准背驰", beichi_status="confirmed",
+                         is_main_signal=True, id="bc")
+    li = build_lianli(weekly_beichi=bc, daily_beichi=bc, min30_beichi=bc,
+                      min30_is_approx=False, side="bottom")
+    assert li.structure_signal == StructureSignal.RESONANCE.value
+    assert li.policy.tier == "最高强度"
+    assert li.policy.stance == "strong_add"
+    assert li.min30_status == "真30min"
+    assert li.downgraded is False
+
+    # 30min 用日线内部近似 → 降级共振(降一档),不顶格
+    li2 = build_lianli(weekly_beichi=bc, daily_beichi=bc, min30_beichi=bc,
+                       min30_is_approx=True, side="bottom")
+    assert li2.structure_signal == StructureSignal.DOWNGRADED.value
+    assert li2.policy.tier == "降一档"
+    assert li2.min30_status == "近似"
 
 
 def test_weekly_synthesized_from_daily_anchored_friday():

@@ -22,8 +22,9 @@ from .beichi import BeichiStatus, Grade
 
 
 class StructureSignal(str, Enum):
-    RESONANCE = "共振背驰"              # 最强转折(真共振)
-    DOWNGRADED = "降级共振"            # 近似共振,降一档
+    RESONANCE = "共振背驰"              # 三级标准齐全(真 30min)→ 最高强度
+    DOWNGRADED = "降级共振"            # 30min 用日线内部近似 → 降一档
+    PENDING_30MIN = "日周共振·待30min"  # 日+周标准但 30min 缺失 → 降一档(防把没取到的当已确认共振)
     LEVEL_TURN = "本级别转折成立"
     SUBLEVEL_PROTECT = "次级别回调·保护级"
     SMALL_TO_BIG = "小转大/信号失效"
@@ -74,9 +75,10 @@ def classify_lianli(
     if daily_continuation_failed:                     # 背驰后未反向、盘整顺原向
         return StructureSignal.SMALL_TO_BIG
     if not min30_available:
-        # 日-周两级联立(30min 先留空):只用标准档,弱信号不进任何主信号
+        # 日-周两级联立(30min 缺失/未取):★ 降级隔离——不得把没取到的 30min 当已确认共振。
+        # 日+周标准 → 日周共振·待30min(降一档);仅日标准 → 本级别转折;弱信号 → 无。
         if weekly_standard and daily_standard:
-            return StructureSignal.RESONANCE
+            return StructureSignal.PENDING_30MIN
         if daily_standard:
             return StructureSignal.LEVEL_TURN
         return StructureSignal.NONE
@@ -92,7 +94,8 @@ def classify_lianli(
 
 
 def is_downgraded(signal: StructureSignal) -> bool:
-    return signal == StructureSignal.DOWNGRADED
+    """降一档共振:30min 近似(降级共振)或 30min 缺失(待30min)均算降级。"""
+    return signal in (StructureSignal.DOWNGRADED, StructureSignal.PENDING_30MIN)
 
 
 # ── §9.2 区间套定位 ───────────────────────────────────────────────────────
@@ -166,7 +169,8 @@ def map_policy(signal: StructureSignal, *, side: str) -> Policy:
         return Policy(signal.value, side, "最高强度",
                       "清仓/大幅减" if is_top else "重仓建仓",
                       Stance.STRONG_REDUCE.value if is_top else Stance.STRONG_ADD.value)
-    if signal == StructureSignal.DOWNGRADED:
+    if signal in (StructureSignal.DOWNGRADED, StructureSignal.PENDING_30MIN):
+        # 降一档:30min 近似(降级共振)或缺失(待30min)同口径——顶减仓不清仓/底分批不重仓
         return Policy(signal.value, side, "降一档",
                       "减仓/降风险(不清仓)" if is_top else "试仓/分批建仓(不重仓)",
                       Stance.REDUCE.value if is_top else Stance.ADD.value,
@@ -227,6 +231,7 @@ class Lianli:
     downgraded: bool
     interval_nest: IntervalNest | None
     policy: Policy                 # 主观·强度档
+    min30_status: str = "缺失"      # 真30min / 近似 / 缺失(降级隔离标记)
     policy_divergence: bool | None = None
     review_notes: list = field(default_factory=list)
 
@@ -256,6 +261,12 @@ def build_lianli(
     )
     policy = map_policy(signal, side=side)
     divergence = compare_review(policy, review) if review is not None else None
+    if min30_beichi is None:
+        min30_status = "缺失"
+    elif min30_is_approx:
+        min30_status = "近似"
+    else:
+        min30_status = "真30min"
     return Lianli(
         level_beichi={
             "weekly": getattr(weekly_beichi, "grade", None),
@@ -266,6 +277,7 @@ def build_lianli(
         downgraded=is_downgraded(signal),
         interval_nest=interval_nest,
         policy=policy,
+        min30_status=min30_status,
         policy_divergence=divergence,
         review_notes=[review] if review is not None else [],
     )
