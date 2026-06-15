@@ -358,9 +358,12 @@ def run_pipeline(
     monitor = []
     if len(df):
         current = float(df["close"].iloc[-1])
-        latest_zs = d["zhongshus"][-1] if d["zhongshus"] else None
-        first_buy_low = next((m.pivot_price for m in maimaidians
-                              if m.kind == "一买"), None)
+        # 按 confirm_date 取时间最近的中枢与最近的一买(防拿到旧中枢/最早一买)
+        zss = d["zhongshus"]
+        latest_zs = (max(zss, key=lambda z: z.confirm_date) if zss else None)
+        firsts = [m for m in maimaidians if m.kind == "一买" and m.pivot_date is not None]
+        first_buy_low = (max(firsts, key=lambda m: m.pivot_date).pivot_price
+                         if firsts else None)
         monitor = derive_monitor_levels(current_price=current, zhongshu=latest_zs,
                                         recent_first_buy_low=first_buy_low)
 

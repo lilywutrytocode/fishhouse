@@ -254,6 +254,23 @@ def test_daily_only_beichi_is_level_turn_not_resonance():
     assert li.policy.tier != "最高强度"               # 非最高强度
 
 
+def test_monitor_uses_latest_zhongshu_and_first_buy():
+    # 确定层 bug 回归:监控位取时间最近的中枢与最近的一买(非拼接顺序最后/最早)
+    from chanlun.data.loaders import load_local_csv
+
+    df = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df
+    r = run_pipeline(df)
+    zss = r["zhongshus"]
+    firsts = [m for m in r["maimaidians"] if m.kind == "一买"]
+    assert zss and firsts
+    latest_zs = max(zss, key=lambda z: z.confirm_date)
+    latest_buy = max(firsts, key=lambda m: m.pivot_date)
+    caution = [m for m in r["monitor"] if m.tier == "caution"]
+    rea = [m for m in r["monitor"] if m.tier == "reassessment"]
+    assert caution and caution[0].price in (latest_zs.ZG, latest_zs.ZD)
+    assert rea and rea[0].price == latest_buy.pivot_price
+
+
 def test_policy_filters_weak_signal_no_main_action():
     # policy 层统一按 is_main 过滤:仅弱背驰背景(非主信号)→ 不进任何主信号动作
     from types import SimpleNamespace
