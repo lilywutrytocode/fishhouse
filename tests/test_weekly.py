@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from chanlun.data.models import HealthStatus, validate_canonical
-from chanlun.data.weekly import synthesize_weekly
+from chanlun.data.weekly import synthesize_monthly, synthesize_weekly
 from tests.conftest import make_daily, weekdays
 
 
@@ -46,3 +46,19 @@ def test_weekly_passes_when_daily_health_ok():
     df = make_daily(weekdays(date(2024, 1, 1), 5))
     wk = synthesize_weekly(df, daily_health_status=HealthStatus.OK.value)
     assert len(wk) == 1
+
+
+def test_monthly_synthesis_anchors_month_end():
+    days = weekdays(date(2024, 1, 1), 65)              # 约 3 个月
+    wk = synthesize_monthly(make_daily(days, base=100.0, step=1.0))
+    validate_canonical(wk)
+    assert len(wk) >= 3
+    assert wk.index[0].is_month_end                    # 锚定月末
+    first_month = make_daily(days, base=100.0, step=1.0).iloc[:21]
+    assert wk.iloc[0]["open"] == first_month.iloc[0]["open"]
+
+
+def test_monthly_rejects_when_daily_health_reject():
+    df = make_daily(weekdays(date(2024, 1, 1), 30))
+    with pytest.raises(ValueError, match="REJECT"):
+        synthesize_monthly(df, daily_health_status=HealthStatus.REJECT.value)

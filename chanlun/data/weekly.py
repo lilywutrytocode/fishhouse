@@ -46,3 +46,23 @@ def synthesize_weekly(
     weekly = weekly[list(OHLCV_COLUMNS)]
     weekly.index.name = "date"
     return weekly
+
+
+def synthesize_monthly(
+    daily: pd.DataFrame,
+    *,
+    daily_health_status: str | None = None,
+) -> pd.DataFrame:
+    """把规范日线合成规范月线(锚定月末 ME),口径同周线(由日线快照合成、可复现)。"""
+    validate_canonical(daily)
+    if daily_health_status == HealthStatus.REJECT.value:
+        raise ValueError("日线健康状态为 REJECT,拒绝合成月线(§1.9 数据门禁)")
+    if daily.empty:
+        return daily.copy()
+
+    monthly = daily.resample("ME").agg(_AGG)
+    monthly = monthly.dropna(subset=["open", "high", "low", "close"])
+    monthly = monthly[list(OHLCV_COLUMNS)]
+    monthly.index.name = "date"
+    return monthly
+
