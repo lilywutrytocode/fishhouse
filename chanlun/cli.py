@@ -14,6 +14,7 @@ import sys
 import pandas as pd
 
 from .config import DEFAULT_CONFIG, Config, market_of
+from .data.consistency import check_consistency
 from .data.weekly import synthesize_weekly
 from .monitor import derive_monitor_levels
 from .output import build_output, to_json
@@ -140,7 +141,8 @@ def detect_beichis(bi_zhongshu, confirmed_bis, macd, df, *, level, config):
                       pivot_price=C.pivot_price, confirm_date=C.confirm_date,
                       confirm_price=C.confirm_price, executable_price=exe, id=C.id),
             btype=BeichiType.CONSOLIDATION.value, compare_unit="bi",
-            level=level, config=config, related_zhongshu_id=zs.id)
+            level=level, config=config, related_zhongshu_id=zs.id,
+            seg_start_date=A.start_date)
         # 只收已确认且成档的背驰(C 已 confirmed)
         if bc is not None and bc.confirm_date is not None:
             bc.id = f"beichi_{_LEVEL_CODE.get(level, level)}_{len(out) + 1:03d}"
@@ -183,7 +185,8 @@ def detect_trend_beichis(bi_zhongshu, confirmed_bis, macd, df, *, level, config)
                       pivot_price=C.pivot_price, confirm_date=C.confirm_date,
                       confirm_price=C.confirm_price, executable_price=exe, id=C.id),
             btype=BeichiType.TREND.value, compare_unit="bi", level=level, config=config,
-            related_zhongshu_id=zs2.id, reset_dif_values=reset)
+            related_zhongshu_id=zs2.id, reset_dif_values=reset,
+            seg_start_date=A.start_date)
         if bc is not None and bc.confirm_date is not None:
             bc.id = f"beichi_{_LEVEL_CODE.get(level, level)}_t{len(out) + 1:03d}"
             out.append((bc, zs2, trend))
@@ -295,31 +298,65 @@ def _level_structures(df: pd.DataFrame, *, level: str, config: Config) -> dict:
     }
 
 
-def build_lianli_two_level(daily_tuples, weekly_tuples, *, level):
-    """§9.3 日-周两级联立:取日线主背驰(标准 is_main)+ 同向周线主背驰 → 共振/转折。
+def _beichi_span(bc):
+    """背驰段时间跨度 [A段起点, C段确认]。"""
+    start = bc.seg_start_date or bc.pivot_date
+    return start, bc.confirm_date
 
-    ★ policy 按 is_main 过滤:无日线主背驰(仅弱信号)→ 不进任何主信号动作(structure_signal=无)。
+
+def _time_contains(outer, inner) -> bool:
+    """§9.2 区间套:小级别背驰的**精确点**(pivot→confirm)落在大级别背驰段时间范围内。
+
+    (用小级别的极值/确认点而非其 A 段起点,避免跨级别重采样导致的起点错位;
+    但大级别背驰段必须『当前在进行』——若其 confirm 早于小级别背驰点则不嵌套 → 无共振。)
     """
-    daily_main = next(((bc, side) for bc, _z, side in daily_tuples
-                       if bc.is_main_signal), None)
-    if daily_main is None:
-        if not daily_tuples:
-            return None
-        bc, _z, side = daily_tuples[0]                  # 仅弱背驰背景 → 无主信号
-        return build_lianli(daily_beichi=bc,
-                            side="bottom" if side == DOWN else "top")
-    d_bc, d_side = daily_main
-    w_bc = next((bc for bc, _z, side in weekly_tuples
-                 if bc.is_main_signal and side == d_side), None)
-    return build_lianli(daily_beichi=d_bc, weekly_beichi=w_bc,
-                        side="bottom" if d_side == DOWN else "top")
+    os_, oe = _beichi_span(outer)
+    ip, ic = inner.pivot_date, inner.confirm_date
+    if None in (os_, oe, ip, ic):
+        return False
+    return os_ <= ip and ic <= oe
+
+
+def build_lianli_nested(daily_tuples, weekly_tuples, *, level,
+                        min30_tuples=None, min30_consistent=True):
+    """§9.2 区间套联立:以右端当前日线主背驰为锚,要求小级别背驰**时间嵌套**于大级别同向背驰段。
+
+    - 周线同向主背驰的段【时间范围包含】日线背驰段 → 日嵌于周(共振候选);
+      大级别当前无在进行的同向背驰(如周线最近标准背驰是 2023 旧底)→ 不嵌套 → 右端无共振。
+    - 真 30min(且与日线同前复权基准)同向主背驰【嵌于日线段内】→ 三级齐 → 共振·最高强度;
+      否则(30min 缺失/不一致)→ 日周共振·待30min 降一档。
+    - 无日线主背驰(仅弱信号)→ structure_signal=无,不进任何主信号动作。
+    """
+    min30_tuples = min30_tuples or []
+    if not daily_tuples:
+        return None
+    d_mains = [(bc, s) for bc, _z, s in daily_tuples if bc.is_main_signal]
+    if not d_mains:
+        bc, _z, s = daily_tuples[0]                     # 仅弱背驰背景 → 无主信号
+        return build_lianli(daily_beichi=bc, side="bottom" if s == DOWN else "top")
+
+    d_bc, d_side = max(d_mains, key=lambda t: t[0].confirm_date)  # 右端当前日线主背驰
+    side = "bottom" if d_side == DOWN else "top"
+    # 周线:同向标准主背驰,其段时间范围包含日线背驰段 → 嵌套
+    w_bc = next((bc for bc, _z, s in weekly_tuples
+                 if bc.is_main_signal and s == d_side and _time_contains(bc, d_bc)), None)
+    # 30min:一致基准 + 同向标准主背驰,且嵌于日线段内
+    m_bc = None
+    if min30_consistent:
+        m_bc = next((bc for bc, _z, s in min30_tuples
+                     if bc.is_main_signal and s == d_side and _time_contains(d_bc, bc)), None)
+    return build_lianli(weekly_beichi=w_bc, daily_beichi=d_bc, min30_beichi=m_bc, side=side)
 
 
 def run_pipeline(
     df: pd.DataFrame, *, level: str = "daily", config: Config = DEFAULT_CONFIG,
-    weekly_df: pd.DataFrame | None = None,
+    weekly_df: pd.DataFrame | None = None, min30_df: pd.DataFrame | None = None,
 ) -> dict:
-    """跑完整结构链路 + 日-周联立,返回**原始结构对象**(供输出层与测试使用)。"""
+    """跑完整结构链路 + 区间套联立,返回**原始结构对象**(供输出层与测试使用)。
+
+    ``min30_df`` 给定时:§1.10 自动校验其与日线是否同前复权基准,不一致(REJECT_LIANLI)
+    则该 30min **不进日-30min 联立**(只用一致基准),仅日线分析照常。
+    """
     d = _level_structures(df, level=level, config=config)
     beichi_tuples = d["beichi_tuples"]
     beichis = [bc for bc, _z, _s in beichi_tuples]
@@ -344,16 +381,28 @@ def run_pipeline(
     maimaidians = [m for m in maimaidians if not _confirm_in_warmup(m)]
     assign_ids(maimaidians, level=level)
 
-    # §1.9 周线由日线合成 + §9.3 日-周联立(30min 先留空接口)
+    # §1.9 周线由日线合成 + §1.10 30min 一致性门禁 + §9.2 区间套联立
     weekly_tuples = []
     weekly_beichis = []
+    min30_tuples = []
+    min30_beichis = []
+    min30_consistency = None       # None=未提供 / OK / WARN / REJECT_LIANLI
     if level == "daily":
         wdf = weekly_df if weekly_df is not None else synthesize_weekly(df)
         if len(wdf) >= 5:
             w = _level_structures(wdf, level="weekly", config=config)
             weekly_tuples = w["beichi_tuples"]
             weekly_beichis = [bc for bc, _z, _s in weekly_tuples]
-    lianli = build_lianli_two_level(beichi_tuples, weekly_tuples, level=level)
+        if min30_df is not None:
+            cons = check_consistency(min30_df, df, symbol="", config=config)
+            min30_consistency = cons.status
+            if not cons.reject_daily_30min_lianli:     # 一致基准才进联立
+                m = _level_structures(min30_df, level="min30", config=config)
+                min30_tuples = m["beichi_tuples"]
+                min30_beichis = [bc for bc, _z, _s in min30_tuples]
+    lianli = build_lianli_nested(
+        beichi_tuples, weekly_tuples, level=level, min30_tuples=min30_tuples,
+        min30_consistent=(min30_consistency != "REJECT_LIANLI"))
 
     monitor = []
     if len(df):
@@ -379,6 +428,7 @@ def run_pipeline(
         "bis": d["bis"], "segments": d["segments"], "zhongshus": d["zhongshus"],
         "beichis": beichis, "maimaidians": maimaidians, "lianli": lianli,
         "monitor": monitor, "weekly_beichis": weekly_beichis,
+        "min30_beichis": min30_beichis, "min30_consistency": min30_consistency,
         "macd_warmup": macd_warmup,
     }
 
@@ -386,16 +436,20 @@ def run_pipeline(
 def analyze(
     df: pd.DataFrame, *, symbol: str, market: str | None = None,
     level: str = "daily", data_health=None, snapshot_meta=None,
-    config: Config = DEFAULT_CONFIG,
+    config: Config = DEFAULT_CONFIG, min30_df: pd.DataFrame | None = None,
 ) -> dict:
-    """规范 OHLCV → §11.1 输出 dict(完整链路 + executable_price)。"""
-    r = run_pipeline(df, level=level, config=config)
+    """规范 OHLCV → §11.1 输出 dict(完整链路 + executable_price)。
+
+    ``min30_df`` 给定 → §1.10 一致基准校验后接入日-30min 区间套联立。
+    """
+    r = run_pipeline(df, level=level, config=config, min30_df=min30_df)
     out = build_output(
         symbol=symbol, level=level, data_health=data_health, snapshot_meta=snapshot_meta,
         bi=r["bis"], xianduan=r["segments"], zhongshu=r["zhongshus"],
         beichi=r["beichis"], mai_mai_dian=r["maimaidians"], lianli=r["lianli"],
         monitor_levels=r["monitor"], config=config)
     out["macd_warmup"] = r["macd_warmup"]              # §7.1 暖机区标注
+    out["min30_consistency"] = r["min30_consistency"]   # §1.10 30min 联立门禁
     return out
 
 

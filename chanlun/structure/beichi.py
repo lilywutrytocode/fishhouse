@@ -98,6 +98,7 @@ class Beichi:
     related_zhongshu_id: str | None = None
     a_unit_id: str | None = None
     c_unit_id: str | None = None
+    seg_start_date: pd.Timestamp | None = None   # 背驰段起点(A 段起点),供 §9.2 区间套嵌套
     id: str | None = None
 
     def __post_init__(self):
@@ -196,6 +197,7 @@ def evaluate_divergence(
     config: Config = DEFAULT_CONFIG,
     related_zhongshu_id: str | None = None,
     reset_dif_values=None,
+    seg_start_date=None,
 ) -> Beichi | None:
     """比较进入段 A 与离开段 C,产出背驰判定(无背驰且非疑似 → None)。"""
     if not c.makes_new_extreme:           # §7.2 前提:价格须创新高/新低
@@ -231,6 +233,7 @@ def evaluate_divergence(
         executable_price=c.executable_price if confirmed else None,
         related_zhongshu_id=related_zhongshu_id,
         a_unit_id=a.id, c_unit_id=c.id,
+        seg_start_date=seg_start_date,         # A 段起点(供区间套嵌套)
     )
 
 

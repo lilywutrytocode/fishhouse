@@ -275,12 +275,79 @@ def test_policy_filters_weak_signal_no_main_action():
     # policy 层统一按 is_main 过滤:仅弱背驰背景(非主信号)→ 不进任何主信号动作
     from types import SimpleNamespace
 
-    from chanlun.cli import build_lianli_two_level
+    from chanlun.cli import build_lianli_nested
     from chanlun.structure.inclusion import DOWN
 
     weak = SimpleNamespace(grade="面积背驰", beichi_status="confirmed",
                            is_main_signal=False, id="bc")
-    li = build_lianli_two_level([(weak, None, DOWN)], [], level="daily")
+    li = build_lianli_nested([(weak, None, DOWN)], [], level="daily")
     assert li.structure_signal == StructureSignal.NONE.value
     assert li.policy.tier != "最高强度"
     assert li.policy.stance == "hold"                  # 弱信号 → 观望,无主动作
+
+
+# ── (B) §1.10 一致性门禁:基准不一致的日-30min 不进联立 ─────────────────────
+def test_consistency_gate_rejects_mixed_adjustment_basis():
+    from chanlun.data.loaders import load_local_csv
+    ld = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df
+    sd = load_local_csv(
+        "chanlun/data/xinyisheng_300502_daily_20250701_20260609_macd.csv",
+        level="daily").df
+    m30 = load_local_csv(
+        "chanlun/data/xinyisheng_300502_30min_20260408_20260610_macd.csv",
+        level="min30").df
+    # 长日线与 30min 前复权基准不一致 → REJECT_LIANLI(30min 不进联立)
+    o_bad = analyze(ld, symbol="300502", min30_df=m30)
+    assert o_bad["min30_consistency"] == "REJECT_LIANLI"
+    assert o_bad["lianli"]["min30_status"] == "缺失"        # 30min 未参与
+    # 短日线与 30min 一致 → OK
+    o_ok = analyze(sd, symbol="300502", min30_df=m30)
+    assert o_ok["min30_consistency"] == "OK"
+
+
+# ── (A) §9.2 区间套嵌套:旧周线背驰不嵌套当前日线 → 右端无共振 ───────────────
+def _mkbc(pivot, confirm, start, grade="标准背驰"):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        grade=grade, beichi_status="confirmed",
+        is_main_signal=(grade == "标准背驰"),
+        pivot_date=pd.Timestamp(pivot, tz="Asia/Shanghai"),
+        confirm_date=pd.Timestamp(confirm, tz="Asia/Shanghai"),
+        seg_start_date=pd.Timestamp(start, tz="Asia/Shanghai"), id="bc")
+
+
+def test_stale_weekly_beichi_does_not_resonate():
+    from chanlun.cli import build_lianli_nested
+    from chanlun.structure.inclusion import DOWN
+    daily = _mkbc("2026-02-02", "2026-02-03", "2026-01-10")   # 当前日线底背驰
+    weekly_stale = _mkbc("2023-02-10", "2023-02-24", "2022-10-14")  # 旧周线底背驰
+    li = build_lianli_nested([(daily, None, DOWN)], [(weekly_stale, None, DOWN)],
+                             level="daily")
+    # 旧周线段不含当前日线背驰点 → 不嵌套 → 本级别转折(非共振/待30min)
+    assert li.structure_signal == StructureSignal.LEVEL_TURN.value
+
+
+def test_current_weekly_nests_daily_pending_30min():
+    from chanlun.cli import build_lianli_nested
+    from chanlun.structure.inclusion import DOWN
+    daily = _mkbc("2026-02-02", "2026-02-10", "2026-01-10")
+    weekly_now = _mkbc("2026-01-15", "2026-03-01", "2025-11-01")  # 段含日线背驰点
+    li = build_lianli_nested([(daily, None, DOWN)], [(weekly_now, None, DOWN)],
+                             level="daily")
+    # 周线段嵌套当前日线 + 30min 缺失 → 日周共振·待30min(降一档)
+    assert li.structure_signal == StructureSignal.PENDING_30MIN.value
+    assert li.policy.tier == "降一档"
+
+
+def test_three_level_nesting_real_30min_resonance():
+    from chanlun.cli import build_lianli_nested
+    from chanlun.structure.inclusion import DOWN
+    daily = _mkbc("2026-02-02", "2026-02-10", "2026-01-10")
+    weekly_now = _mkbc("2026-01-15", "2026-03-01", "2025-11-01")
+    m30 = _mkbc("2026-02-03", "2026-02-05", "2026-01-20")      # 嵌于日线段内
+    li = build_lianli_nested([(daily, None, DOWN)], [(weekly_now, None, DOWN)],
+                             level="daily", min30_tuples=[(m30, None, DOWN)])
+    # 三级时间嵌套齐 + 真30min → 共振·最高强度
+    assert li.structure_signal == StructureSignal.RESONANCE.value
+    assert li.policy.tier == "最高强度"
+    assert li.min30_status == "真30min"
