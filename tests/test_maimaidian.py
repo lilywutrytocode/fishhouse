@@ -111,8 +111,28 @@ def test_first_buy_area_grade_also_weak():
     bc = mk_beichi(btype=BeichiType.CONSOLIDATION.value, grade="面积背驰",
                    is_main_signal=False)
     mmd = detect_first(bc, zs)
+    # 盘整背驰 → 标签恒为 ·盘背(强弱另见 strength/is_main,不混入标签)
     assert mmd.strength == "弱" and mmd.is_main is False
-    assert mmd.label == "一买·弱"             # 盘整弱档也标 弱
+    assert mmd.label == "一买·盘背"
+
+
+def test_trend_weak_beichi_labels_weak_not_standard():
+    # ★ 回归②:DIF/面积 弱档趋势背驰不得标 ·标准,只能标 ·弱
+    zs = mk_zhongshu()
+    for g in ("DIF背驰", "面积背驰"):
+        mmd = detect_first(mk_beichi(btype=BeichiType.TREND.value, grade=g,
+                                     is_main_signal=False), zs)
+        assert mmd.strength == "弱" and mmd.is_main is False
+        assert mmd.label == "一买·弱"
+        assert mmd.label != "一买·标准"
+        assert mmd.subkind == SUB_STANDARD       # 趋势子类仍记录(正交)
+
+
+def test_trend_standard_beichi_labels_standard():
+    zs = mk_zhongshu()
+    mmd = detect_first(mk_beichi(btype=BeichiType.TREND.value, grade="标准背驰",
+                                 is_main_signal=True), zs)
+    assert mmd.label == "一买·标准" and mmd.is_main is True
 
 
 def test_first_buy_pending_when_beichi_not_confirmed():

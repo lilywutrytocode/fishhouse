@@ -400,3 +400,25 @@ def test_300502_right_end_anchor_beichi_invalidated():
     # 日线顶背驰 336@2026-02 被随后涨至 506 超越 → 信号失效/顺势,而非减仓
     assert o["lianli"]["structure_signal"] == StructureSignal.SMALL_TO_BIG.value
     assert o["lianli"]["policy"]["stance"] == "hold"
+
+
+# ── 回归①:同一 A/C 被多个相邻中枢对命中 → 只输出一个趋势背驰(不重复)──────────
+def test_trend_beichi_deduplicated_300750():
+    from chanlun.data.loaders import load_local_csv
+    df = load_local_csv(
+        "chanlun/data/raw/300750/300750_qfq_daily_20210101_20230731.csv",
+        level="daily").df
+    r = run_pipeline(df)
+    trend = [b for b in r["beichis"] if b.type == BeichiType.TREND.value]
+    # 同 (a_unit_id,c_unit_id,pivot,confirm) 不得重复
+    keys = [(b.a_unit_id, b.c_unit_id, b.pivot_date, b.confirm_date) for b in trend]
+    assert len(keys) == len(set(keys)), "趋势背驰存在重复"
+    # 由该趋势背驰派生的买卖点也不重复(同 pivot/confirm/kind)
+    sig_keys = [(m.kind, m.pivot_date, m.confirm_date, m.pivot_price)
+                for m in r["maimaidians"] if m.subkind == "标准"]
+    assert len(sig_keys) == len(set(sig_keys)), "趋势派生买卖点存在重复"
+    # 该弱档趋势背驰派生的卖点应标 ·弱,不得标 ·标准
+    for m in r["maimaidians"]:
+        if m.subkind == "标准" and m.strength == "弱":
+            assert m.label.endswith("·弱")
+            assert not m.label.endswith("·标准")

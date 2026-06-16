@@ -188,9 +188,20 @@ def detect_trend_beichis(bi_zhongshu, confirmed_bis, macd, df, *, level, config)
             related_zhongshu_id=zs2.id, reset_dif_values=reset,
             seg_start_date=A.start_date)
         if bc is not None and bc.confirm_date is not None:
-            bc.id = f"beichi_{_LEVEL_CODE.get(level, level)}_t{len(out) + 1:03d}"
             out.append((bc, zs2, trend))
-    return out
+    # ★ 去重:多个相邻中枢对会命中同一 A段/C段 → 同一趋势背驰,只保留一个
+    #   (同 a_unit_id/c_unit_id/pivot/confirm),其余不作为独立背驰进入事件流。
+    seen, deduped = set(), []
+    for bc, zs, tr in out:
+        key = (bc.a_unit_id, bc.c_unit_id, bc.pivot_date, bc.pivot_price,
+               bc.confirm_date, bc.confirm_price)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((bc, zs, tr))
+    for i, (bc, zs, tr) in enumerate(deduped, 1):
+        bc.id = f"beichi_{_LEVEL_CODE.get(level, level)}_t{i:03d}"
+    return deduped
 
 
 def detect_maimaidians(beichi_tuples, *, level):
@@ -496,10 +507,11 @@ def format_report(output: dict) -> str:
     if pending_xd:
         lines.append(f"右端未确认线段: state={[s['state'] for s in pending_xd]}")
     for m in output["mai_mai_dian"]:
-        lines.append(f"买卖点 {m['kind']}·{m.get('subkind') or ''} "
+        lines.append(f"买卖点 {m.get('label') or m['kind']} "
                      f"pivot={m['pivot_price']}({m.get('pivot_relation_to_zhongshu')}) "
                      f"confirm={m.get('confirm_relation_to_zhongshu')} "
-                     f"executable={m['executable_price']} status={m['status']}")
+                     f"executable={m['executable_price']} is_main={m.get('is_main')} "
+                     f"status={m['status']}")
     if output["zhongshu"]:
         z = output["zhongshu"][-1]
         lines.append(f"最近中枢 [{z['ZD']}, {z['ZG']}] GG={z['GG']} DD={z['DD']} "

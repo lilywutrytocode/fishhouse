@@ -97,6 +97,7 @@ class MaiMaiDian:
     beichi_grade: str | None = None     # 标准背驰/面积背驰/DIF背驰
     strength: str | None = None         # 标准(建立在标准档背驰)/ 弱(仅面积/DIF档)
     is_main: bool = False               # 仅标准档背驰之上的一买为主买点
+    label: str | None = None            # 显示标签(__post_init__ 计算)
     id: str | None = None
 
     def __post_init__(self):
@@ -104,12 +105,20 @@ class MaiMaiDian:
             assert self.confirm_date > self.pivot_date, (
                 "confirm_date 必须晚于 pivot_date(§0.5 买卖点右侧确认)"
             )
+        self.label = self._compute_label()
 
-    @property
-    def label(self) -> str:
-        """显示标签:弱一买/卖标 ``一买·弱``;否则 ``一买·{子类}``。"""
-        if self.kind in ("一买", "一卖") and self.strength == "弱":
-            return f"{self.kind}·弱"
+    def _compute_label(self) -> str:
+        """标签区分『趋势子类』与『背驰强弱档』,不混:
+        - 趋势标准背驰 → 一买/一卖·标准
+        - 趋势面积/DIF 弱背驰 → 一买/一卖·弱
+        - 盘整背驰 → 一买/一卖·盘背(强弱另见 is_main/strength)
+        """
+        if self.kind in ("一买", "一卖"):
+            if self.subkind == SUB_PANBEI:          # 盘整背驰
+                return f"{self.kind}·盘背"
+            if self.strength == "弱":               # 趋势但弱档(面积/DIF)
+                return f"{self.kind}·弱"
+            return f"{self.kind}·标准"               # 趋势标准档
         if self.subkind:
             return f"{self.kind}·{self.subkind}"
         return self.kind
