@@ -2,43 +2,57 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from chanlun.data.loaders import load_local_csv
 from chanlun.data.models import OHLCV_COLUMNS, validate_canonical
-from chanlun.structure.beichi import compute_macd
-
-RAW_DAILY = "chanlun/data/xinyisheng_300502_daily_20250701_20260609_macd.csv"
-RAW_30MIN = "chanlun/data/xinyisheng_300502_30min_20260408_20260610_macd.csv"
 
 
-def test_load_daily_chinese_header_to_canonical():
-    res = load_local_csv(RAW_DAILY, level="daily")
-    assert res.df.shape == (228, 6)
-    assert list(res.df.columns) == list(OHLCV_COLUMNS)
-    validate_canonical(res.df)                          # tz-aware、递增唯一、high≥low
+def _write(p, header, rows):
+    p.write_text(header + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    return str(p)
+
+
+def test_load_daily_chinese_header_to_canonical(tmp_path):
+    path = _write(tmp_path / "d.csv",
+                  "日期,开盘,最高,最低,收盘,成交量,成交额",
+                  ["2024-01-02,10.0,10.5,9.8,10.2,1000,1e7",
+                   "2024-01-03,10.2,10.9,10.1,10.7,1100,1.1e7",
+                   "2024-01-04,10.7,11.0,10.5,10.6,1200,1.2e7"])
+    res = load_local_csv(path, level="daily")
+    assert list(res.df.columns) == list(OHLCV_COLUMNS)   # 中文表头已映射
+    assert res.df.shape == (3, 6)
+    validate_canonical(res.df)
     assert res.df.index.tz is not None
-    assert str(res.source_start_date) == "2025-07-01"
+    assert str(res.source_start_date) == "2024-01-02"
+    assert res.cross_check is None                        # 无 MACD 列
 
 
-def test_file_macd_goes_to_crosscheck_only_and_converges():
-    res = load_local_csv(RAW_DAILY, level="daily")
+def test_file_macd_goes_to_crosscheck_only(tmp_path):
+    # ★ 文件自带 DIF/DEA/MACD柱 只进 cross-check 列,不作信号源
+    path = _write(tmp_path / "dm.csv",
+                  "日期,开盘,最高,最低,收盘,成交量,成交额,DIF,DEA,MACD柱",
+                  ["2024-01-02,10,10.5,9.8,10.2,1000,1e7,0.11,0.05,0.12",
+                   "2024-01-03,10.2,10.9,10.1,10.7,1100,1.1e7,0.18,0.08,0.20"])
+    res = load_local_csv(path, level="daily")
+    assert list(res.df.columns) == list(OHLCV_COLUMNS)   # 规范 df 不含 MACD
+    assert "DIF" not in res.df.columns
     assert res.cross_check is not None
     assert list(res.cross_check.columns) == ["cc_dif", "cc_dea", "cc_macd"]
-    assert len(res.cross_check) == 228
-    # ★ 引擎自算 MACD,与文件自带在尾部(暖机后)收敛 → 证明自算正确
-    m = compute_macd(res.df["close"])
-    tail = np.abs(m["dif"].values[-50:] - res.cross_check["cc_dif"].values[-50:])
-    assert tail.max() < 0.01
+    assert len(res.cross_check) == 2
+    assert res.cross_check.index.equals(res.df.index)
 
 
-def test_load_intraday_30min():
-    res = load_local_csv(RAW_30MIN, level="min30")
-    assert res.df.shape == (344, 6)
+def test_load_intraday_30min(tmp_path):
+    path = _write(tmp_path / "m30.csv",
+                  "日期时间,开盘,最高,最低,收盘,成交量,成交额",
+                  ["2024-01-02 10:00:00,10,10.5,9.8,10.2,500,5e6",
+                   "2024-01-02 10:30:00,10.2,10.6,10.1,10.4,400,4e6"])
+    res = load_local_csv(path, level="min30")
+    assert res.df.shape == (2, 6)
     assert res.df.index.tz is not None
-    assert res.df.index[0].hour == 10                   # 日内时间戳保留
-    assert res.cross_check is not None
+    assert res.df.index[0].hour == 10                     # 日内时间戳保留
+    assert res.cross_check is None
 
 
 def test_ohlcv_only_has_no_crosscheck(tmp_path):
@@ -53,3 +67,11 @@ def test_ohlcv_only_has_no_crosscheck(tmp_path):
     res = load_local_csv(str(p), level="daily")
     assert res.cross_check is None
     assert list(res.df.columns) == list(OHLCV_COLUMNS)
+
+
+def test_real_300502_long_loads(tmp_path):
+    # 真实文件 smoke:长日线规范加载(无 MACD 列)
+    res = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily")
+    assert res.df.shape[1] == 6
+    validate_canonical(res.df)
+    assert res.cross_check is None

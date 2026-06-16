@@ -13,7 +13,7 @@ from chanlun.data.loaders import load_local_csv
 from chanlun.data.models import OHLCV_COLUMNS
 
 NO_WARMUP = Config(macd_warmup_factor=0)
-RAW_DAILY = "chanlun/data/xinyisheng_300502_daily_20250701_20260609_macd.csv"
+RAW_DAILY = "chanlun/data/300502_daily.csv"
 
 
 def _div_df(tz="Asia/Shanghai"):

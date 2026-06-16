@@ -293,12 +293,8 @@ def test_policy_filters_weak_signal_no_main_action():
 def test_consistency_gate_rejects_mixed_adjustment_basis():
     from chanlun.data.loaders import load_local_csv
     ld = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df
-    sd = load_local_csv(
-        "chanlun/data/xinyisheng_300502_daily_20250701_20260609_macd.csv",
-        level="daily").df
-    m30 = load_local_csv(
-        "chanlun/data/xinyisheng_300502_30min_20260408_20260610_macd.csv",
-        level="min30").df
+    sd = load_local_csv("chanlun/data/300502_daily.csv", level="daily").df
+    m30 = load_local_csv("chanlun/data/300502_30min.csv", level="min30").df
     # 长日线与 30min 前复权基准不一致 → REJECT_LIANLI(30min 不进联立)
     o_bad = analyze(ld, symbol="300502", min30_df=m30)
     assert o_bad["min30_consistency"] == "REJECT_LIANLI"
