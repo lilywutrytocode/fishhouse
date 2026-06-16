@@ -118,38 +118,41 @@ def _signal_objs(df):
     return run_pipeline(df, config=NO_WARMUP)["maimaidians"]
 
 
-# ── 趋势背驰一买(≥2 中枢)──────────────────────────────────────────────────
-def test_trend_first_buy_fires():
-    df = make_df_from_points(
-        [100, 80, 92, 82, 90, 81, 88, 62, 72, 64, 70, 63, 71, 58, 64])
-    r = run_pipeline(df, config=NO_WARMUP)
-    assert any(b.type == BeichiType.TREND.value for b in r["beichis"])  # ≥2 中枢 → 趋势背驰
-    firsts = [m for m in r["maimaidians"] if m.kind == "一买" and m.subkind == "标准"]
-    assert firsts, "应 fire 趋势子类一买"
-    m = firsts[0]
-    assert m.executable_price is not None
-    assert m.confirm_date is not None and m.confirm_date > m.pivot_date
-    assert m.related_zhongshu_id and m.related_beichi_id        # 引用 id 齐全
+# ── 回归①:上证 2019-01-04 应识别为趋势标准底背驰 → 一买·标准(局部 A/C 选段)──
+def test_000001_standard_trend_bottom_first_buy():
+    from chanlun.data.loaders import load_local_csv
+    df = load_local_csv(
+        "chanlun/data/raw/000001/000001_sh_daily_20170601_20190630_ohlcv.csv",
+        level="daily").df
+    r = run_pipeline(df)
+    trend = [b for b in r["beichis"] if b.type == BeichiType.TREND.value]
+    bc = next(b for b in trend if str(b.pivot_date)[:10] == "2019-01-04")
+    assert bc.grade == Grade.STANDARD.value and bc.is_main_signal is True
+    assert bc.a_unit_id == "bi_d_020" and bc.c_unit_id == "bi_d_030"   # 局部 A/C
+    assert round(bc.pivot_price, 2) == 2440.91
+    assert abs(bc.area_ratio - 0.339) < 0.02                          # C/A 面积比
+    assert abs(bc.dif_ratio - 0.431) < 0.02                           # DIF 峰值比
+    fb = next(m for m in r["maimaidians"]
+              if m.kind == "一买" and str(m.pivot_date)[:10] == "2019-01-04")
+    assert fb.label == "一买·标准" and fb.is_main is True and fb.subkind == "标准"
 
 
-# ── §8.1 强度档闸:弱档(面积/DIF)趋势背驰 → 一买·弱、不进主信号 ──────────────
-def test_weak_trend_beichi_marks_first_buy_weak():
-    df = make_df_from_points(
-        [100, 80, 92, 82, 90, 81, 88, 62, 72, 64, 70, 63, 71, 58, 64])
-    r = run_pipeline(df, config=NO_WARMUP)
-    trend_bcs = [b for b in r["beichis"] if b.type == BeichiType.TREND.value]
-    assert trend_bcs
-    tb = trend_bcs[0]
-    assert tb.grade in (Grade.AREA.value, Grade.DIF.value)      # 仅面积/DIF 档(弱)
-    assert tb.is_main_signal is False                          # 弱档背驰非主信号
-    weak = [m for m in r["maimaidians"]
-            if m.kind == "一买" and m.related_beichi_id == tb.id]
-    assert weak, "弱档趋势背驰应仍产出一买(标弱)"
-    m = weak[0]
-    assert m.strength == "弱"                                   # 标 弱
-    assert m.is_main is False                                   # ★ 不进主信号
-    assert m.label == "一买·弱" and m.label != "一买·标准"
-    assert m.subkind == "标准"                                  # 趋势子类正交保留
+# ── 回归③:DIF/面积弱档趋势背驰不得生成 ·标准 标签(真实数据补充)──────────────
+def test_weak_trend_beichi_labels_weak_300750():
+    from chanlun.data.loaders import load_local_csv
+    df = load_local_csv(
+        "chanlun/data/raw/300750/300750_qfq_daily_20210101_20230731.csv",
+        level="daily").df
+    r = run_pipeline(df)
+    weak_tr = [b for b in r["beichis"] if b.type == BeichiType.TREND.value
+               and b.grade in (Grade.AREA.value, Grade.DIF.value)]
+    assert weak_tr
+    assert all(not b.is_main_signal for b in weak_tr)
+    for m in r["maimaidians"]:                       # 弱档趋势派生信号标 ·弱,不得 ·标准
+        if m.subkind == "标准" and m.strength == "弱":
+            assert m.label.endswith("·弱")
+            assert m.label not in ("一买·标准", "一卖·标准")
+    assert any(m.label == "一卖·弱" for m in r["maimaidians"])
 
 
 def test_consolidation_first_buy_is_main_when_standard_grade():

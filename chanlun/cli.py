@@ -151,8 +151,14 @@ def detect_beichis(bi_zhongshu, confirmed_bis, macd, df, *, level, config):
 
 
 def detect_trend_beichis(bi_zhongshu, confirmed_bis, macd, df, *, level, config):
-    """§7.4 趋势背驰:≥2 同级别中枢且 zs2 在 zs1 之外(同向趋势),比较趋势首/末同向笔。"""
+    """§7.4 趋势背驰:对每一对同向趋势中枢 (zs1, zs2),取**局部 A/C**比较——
+    A = 进入 zs1 的同向段(zs1 之前最近的同向笔);
+    C = 离开/试图离开 zs2 的同向段(zs2 段内[含 end+1]达趋势极值 DD/GG 的同向笔)。
+
+    ★ 不再从全序列头尾取首/末同向笔(那会跨年错配、漏判局部趋势背驰,并致重复输出)。
+    """
     out = []
+    cb = confirmed_bis
     for k in range(len(bi_zhongshu) - 1):
         zs1, zs2 = bi_zhongshu[k], bi_zhongshu[k + 1]
         if zs2.ZG < zs1.ZD:
@@ -161,14 +167,19 @@ def detect_trend_beichis(bi_zhongshu, confirmed_bis, macd, df, *, level, config)
             trend = UP
         else:
             continue
-        # A = 趋势初始同向推动(从头第一个同向笔);C = 趋势末段同向推动(最后一个)
-        a_idx = next((i for i in range(0, zs1.end_unit + 1)
-                      if confirmed_bis[i].direction == trend), None)
-        c_idx = next((i for i in range(len(confirmed_bis) - 1, zs2.start_unit - 1, -1)
-                      if confirmed_bis[i].direction == trend), None)
-        if a_idx is None or c_idx is None or c_idx <= a_idx:
+        # A = 进入 zs1 的同向段:zs1 起点之前最近的一根同向笔
+        a_idx = next((i for i in range(zs1.start_unit - 1, -1, -1)
+                      if cb[i].direction == trend), None)
+        # C = 离开/试图离开 zs2 的同向段:zs2 段内[含 end+1]达趋势极值(下→最低/上→最高)的同向笔
+        lo, hi = zs2.start_unit, min(len(cb) - 1, zs2.end_unit + 1)
+        cands = [i for i in range(lo, hi + 1) if cb[i].direction == trend]
+        if not cands:
             continue
-        A, C = confirmed_bis[a_idx], confirmed_bis[c_idx]
+        c_idx = (min(cands, key=lambda i: cb[i].pivot_price) if trend == DOWN
+                 else max(cands, key=lambda i: cb[i].pivot_price))
+        if a_idx is None or c_idx <= a_idx:
+            continue
+        A, C = cb[a_idx], cb[c_idx]
         new_ext = (C.pivot_price < A.pivot_price if trend == DOWN
                    else C.pivot_price > A.pivot_price)
         if not new_ext:
@@ -189,7 +200,7 @@ def detect_trend_beichis(bi_zhongshu, confirmed_bis, macd, df, *, level, config)
             seg_start_date=A.start_date)
         if bc is not None and bc.confirm_date is not None:
             out.append((bc, zs2, trend))
-    # ★ 去重:多个相邻中枢对会命中同一 A段/C段 → 同一趋势背驰,只保留一个
+    # ★ 去重:不同中枢对若命中同一 A段/C段 → 同一趋势背驰,只保留一个
     #   (同 a_unit_id/c_unit_id/pivot/confirm),其余不作为独立背驰进入事件流。
     seen, deduped = set(), []
     for bc, zs, tr in out:
