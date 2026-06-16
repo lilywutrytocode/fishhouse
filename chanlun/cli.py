@@ -240,25 +240,39 @@ def bi_to_unit(b) -> Unit:
         n_bars=len(b.source_unit_ids) or 5, id=b.id)
 
 
+def _inherit_strength(child, parent) -> None:
+    """二/三买强度继承:从来源/锚点一买继承 强度档 + 主信号判定(§8.1 强度档闸沿用)。"""
+    if parent is None:
+        return
+    child.strength = parent.strength
+    child.is_main = parent.is_main
+    child.beichi_grade = parent.beichi_grade
+
+
 def detect_second_buys(first_buys, confirmed_bis, *, level):
-    """§8.2 五步:每个已确认一买/一卖后,取其后笔为次级别单位识别二买/二卖。"""
+    """§8.2 五步:每个已确认一买/一卖后,取其后笔为次级别单位识别二买/二卖。
+
+    ★ 二买继承其来源一买的强度档/is_main(标准一买→主二买;弱一买→弱二买)。
+    """
     out = []
     for fb in first_buys:
         if fb.confirm_date is None:
             continue
         subs = [bi_to_unit(b) for b in confirmed_bis if b.start_date >= fb.pivot_date]
-        side = fb.side
-        sb = detect_second(fb, subs, side=side, level=level)
+        sb = detect_second(fb, subs, side=fb.side, level=level)
         if sb is not None:
+            _inherit_strength(sb, fb)               # 继承来源一买
             out.append(sb)
     return out
 
 
-def detect_third_buys(bi_zhongshu, confirmed_bis, *, level):
+def detect_third_buys(bi_zhongshu, confirmed_bis, *, level, first_buys=None):
     """§8.3:笔中枢内向上离开 ZG 的已确认单位(leave)+ 其后反向回试不回(retest)→ 三买。
 
     离开段常作为中枢末成员把 GG 抬过 ZG;回试段为中枢后第一根反向笔(low > ZG)。
+    ★ 三买继承"锚点一买"(同向、pivot 早于三买的最近一买)的强度档/is_main。
     """
+    first_buys = first_buys or []
     out = []
     for zs in bi_zhongshu:
         ri = zs.end_unit + 1
@@ -278,6 +292,10 @@ def detect_third_buys(bi_zhongshu, confirmed_bis, *, level):
         t = detect_third(zs, bi_to_unit(leave_b), bi_to_unit(retest_b),
                          side=BUY, level=level)
         if t is not None:
+            anchors = [m for m in first_buys if m.kind == "一买"
+                       and m.pivot_date is not None and m.pivot_date <= t.pivot_date]
+            anchor = max(anchors, key=lambda m: m.pivot_date) if anchors else None
+            _inherit_strength(t, anchor)            # 继承锚点一买
             out.append(t)
     return out
 
@@ -459,7 +477,8 @@ def run_pipeline(
 
     first_buys = detect_maimaidians(beichi_tuples, level=level)
     second_buys = detect_second_buys(first_buys, d["confirmed_bis"], level=level)
-    third_buys = detect_third_buys(d["bi_zhongshu"], d["confirmed_bis"], level=level)
+    third_buys = detect_third_buys(d["bi_zhongshu"], d["confirmed_bis"], level=level,
+                                   first_buys=first_buys)
     maimaidians = first_buys + second_buys + third_buys
 
     # §7.1 暖机守卫:confirm 落在暖机区的买卖点不发(右端未确认 confirm_date=None 保留)

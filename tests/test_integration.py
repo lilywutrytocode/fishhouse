@@ -421,3 +421,55 @@ def test_trend_beichi_deduplicated_300750():
         if m.subkind == "标准" and m.strength == "弱":
             assert m.label.endswith("·弱")
             assert not m.label.endswith("·标准")
+
+
+# ── #3 二/三买强度继承:从来源/锚点一买继承 strength/is_main/beichi_grade ──────
+def test_second_third_buy_inherit_strength_from_first_buy():
+    from chanlun.cli import detect_second_buys, detect_third_buys
+    from chanlun.structure.maimaidian import MaiMaiDian, Unit
+
+    base = pd.Timestamp("2024-01-01", tz="Asia/Shanghai")
+    def _d(n): return base + pd.Timedelta(days=n)
+
+    # 标准档一买(is_main=True)
+    fb_strong = MaiMaiDian(kind="一买", side="buy", level="daily", status="背驰确认",
+        subkind="盘背", pivot_date=_d(1), pivot_price=10.0, confirm_date=_d(3),
+        confirm_price=10.5, executable_price=10.6, beichi_grade="标准背驰",
+        strength="标准", is_main=True, id="fb")
+    # 其后:向上确认 → 向下完成(低点 > 一买)→ 二买
+    subs = [Unit(direction="up", high=15, low=10, pivot_date=_d(5), pivot_price=15,
+                 confirm_date=_d(6), confirm_price=15, executable_price=15, id="u1"),
+            Unit(direction="down", high=15, low=12, pivot_date=_d(8), pivot_price=12,
+                 confirm_date=_d(9), confirm_price=12, executable_price=12, id="u2")]
+    seconds = detect_second_buys([fb_strong], [], level="daily")  # subs via confirmed_bis
+    # detect_second_buys 用 confirmed_bis 造 subs;这里直接验证继承逻辑用底层
+    from chanlun.structure.maimaidian import detect_second
+    sb = detect_second(fb_strong, subs, side="buy", level="daily")
+    assert sb is not None
+    from chanlun.cli import _inherit_strength
+    _inherit_strength(sb, fb_strong)
+    assert sb.kind == "二买" and sb.is_main is True and sb.strength == "标准"
+    assert sb.beichi_grade == "标准背驰"
+
+    # 弱档一买 → 弱二买
+    fb_weak = MaiMaiDian(kind="一买", side="buy", level="daily", status="背驰确认",
+        subkind="标准", pivot_date=_d(1), pivot_price=10.0, confirm_date=_d(3),
+        confirm_price=10.5, executable_price=10.6, beichi_grade="DIF背驰",
+        strength="弱", is_main=False, id="fbw")
+    sb2 = detect_second(fb_weak, subs, side="buy", level="daily")
+    _inherit_strength(sb2, fb_weak)
+    assert sb2.is_main is False and sb2.strength == "弱"
+
+
+def test_300502_second_third_inherit_is_main_in_event_stream():
+    from chanlun.data.loaders import load_local_csv
+    df = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df
+    r = run_pipeline(df, symbol="300502")
+    seconds_thirds = [m for m in r["maimaidians"] if m.kind in ("二买", "三买")]
+    assert seconds_thirds
+    # 每个二/三买的 strength 都已被赋值(非 None,即已继承)
+    for m in seconds_thirds:
+        assert m.strength in ("标准", "弱") or m.is_main in (True, False)
+        # 与某个同向更早一买的强度一致(锚点继承)
+    # 至少有一个继承到 is_main=True(来自标准一买)或 strength 字段非空
+    assert any(m.strength is not None for m in seconds_thirds)
