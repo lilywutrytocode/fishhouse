@@ -43,7 +43,10 @@ from .structure.maimaidian import (
     detect_first,
     detect_second,
     detect_third,
+    mark_overlap_2_3,
 )
+from .structure.zhongshu import SignalEvent, dedupe_event_cluster
+from .probability import to_signal_event
 from .structure.xianduan import Pen, build_segments
 from .structure.zhongshu import BI, XIANDUAN, ZUnit, build_zhongshu
 
@@ -391,9 +394,59 @@ def build_lianli_nested(daily_tuples, weekly_tuples, *, level,
     return build_lianli(weekly_beichi=w_bc, daily_beichi=d_bc, min30_beichi=m_bc, side=side)
 
 
+def assemble_signal_events(maimaidians, *, symbol, df, config):
+    """§10.2 事件流最小闭环出口:
+    - 只取 **confirmed** 买卖点(有 confirm_date 且有 executable_price;末根 live_pending 自动排除);
+    - 统一 SignalEventRecord 结构,触发只用 confirm_date + executable_price(无 pivot_*);
+    - §8.6 二三买重合 → overlap_2_3 + 互入 supporting_signals;
+    - §6.7 同级别同向同类去重(dedupe_event_cluster),其余进 supporting_signals,不重复计入。
+    """
+    confirmed = [m for m in maimaidians
+                 if m.confirm_date is not None and m.executable_price is not None]
+    # §8.6 二三买重合(同向同 pivot)
+    seconds = [m for m in confirmed if m.kind in ("二买", "二卖")]
+    thirds = [m for m in confirmed if m.kind in ("三买", "三卖")]
+    for s in seconds:
+        for t in thirds:
+            if (s.side == t.side and s.pivot_date == t.pivot_date
+                    and s.pivot_price == t.pivot_price):
+                mark_overlap_2_3(s, t)
+                if t.id not in s.supporting_signals:
+                    s.supporting_signals.append(t.id)
+                if s.id not in t.supporting_signals:
+                    t.supporting_signals.append(s.id)
+    records = [to_signal_event(m, beichi_grade=m.beichi_grade) for m in confirmed]
+
+    # §6.7 事件簇去重(适配 SignalEvent → dedupe → 映回 SignalEventRecord)
+    adapters = []
+    for r in records:
+        try:
+            bar = int(df.index.get_loc(r.confirm_date))
+        except (KeyError, TypeError):
+            bar = -1
+        adapters.append(SignalEvent(
+            id=r.id, symbol=symbol, level=r.level, direction=r.direction, kind=r.kind,
+            confirm_date=r.confirm_date, confirm_price=r.confirm_price or 0.0,
+            confirm_bar=bar, source_rank=1,
+            beichi_rank=(2 if r.beichi_grade == "标准背驰"
+                         else (1 if r.beichi_grade else 0)),
+            level30_rank=0))
+    triggers = dedupe_event_cluster(adapters, config=config)
+    by_id = {r.id: r for r in records}
+    out = []
+    for t in triggers:
+        rec = by_id[t.id]
+        rec.supporting_signals = list(dict.fromkeys(
+            list(rec.supporting_signals) + list(t.supporting_signals)))
+        out.append(rec)
+    out.sort(key=lambda r: r.confirm_date)
+    return out
+
+
 def run_pipeline(
     df: pd.DataFrame, *, level: str = "daily", config: Config = DEFAULT_CONFIG,
     weekly_df: pd.DataFrame | None = None, min30_df: pd.DataFrame | None = None,
+    symbol: str = "",
 ) -> dict:
     """跑完整结构链路 + 区间套联立,返回**原始结构对象**(供输出层与测试使用)。
 
@@ -467,12 +520,13 @@ def run_pipeline(
         "note": (f"前 {warmup} 根为 EMA 暖机区(MACD_WARMUP·低置信);"
                  "该区间不发背驰/买卖点"),
     }
+    signal_events = assemble_signal_events(maimaidians, symbol=symbol, df=df, config=config)
     return {
         "bis": d["bis"], "segments": d["segments"], "zhongshus": d["zhongshus"],
         "beichis": beichis, "maimaidians": maimaidians, "lianli": lianli,
         "monitor": monitor, "weekly_beichis": weekly_beichis,
         "min30_beichis": min30_beichis, "min30_consistency": min30_consistency,
-        "macd_warmup": macd_warmup,
+        "macd_warmup": macd_warmup, "signal_events": signal_events,
     }
 
 
@@ -485,15 +539,14 @@ def analyze(
 
     ``min30_df`` 给定 → §1.10 一致基准校验后接入日-30min 区间套联立。
     """
-    r = run_pipeline(df, level=level, config=config, min30_df=min30_df)
-    out = build_output(
+    r = run_pipeline(df, level=level, config=config, min30_df=min30_df, symbol=symbol)
+    return build_output(
         symbol=symbol, level=level, data_health=data_health, snapshot_meta=snapshot_meta,
         bi=r["bis"], xianduan=r["segments"], zhongshu=r["zhongshus"],
         beichi=r["beichis"], mai_mai_dian=r["maimaidians"], lianli=r["lianli"],
-        monitor_levels=r["monitor"], config=config)
-    out["macd_warmup"] = r["macd_warmup"]              # §7.1 暖机区标注
-    out["min30_consistency"] = r["min30_consistency"]   # §1.10 30min 联立门禁
-    return out
+        monitor_levels=r["monitor"], signal_events=r["signal_events"],
+        min30_consistency=r["min30_consistency"], macd_warmup=r["macd_warmup"],
+        config=config)
 
 
 def format_report(output: dict) -> str:

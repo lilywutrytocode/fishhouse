@@ -79,9 +79,12 @@ def build_output(
     mai_mai_dian: list | None = None,
     lianli=None,
     monitor_levels: list | None = None,
+    signal_events: list | None = None,
+    min30_consistency=None,
+    macd_warmup=None,
     config: Config = DEFAULT_CONFIG,
 ) -> dict:
-    """组装顶层输出 dict(§11.1),含版本化字段。"""
+    """组装顶层输出 dict(§11.1 + §10.2 事件流),含版本化字段。"""
     snapshot_id = getattr(snapshot_meta, "data_snapshot_id", None)
     return {
         "spec_version": SPEC_VERSION,
@@ -98,19 +101,36 @@ def build_output(
         "mai_mai_dian": [_serialize(m) for m in (mai_mai_dian or [])],
         "lianli": _jsonable(lianli) if lianli is not None else None,
         "monitor_levels": [_jsonable(m) for m in (monitor_levels or [])],
+        "signal_events": [_serialize(e) for e in (signal_events or [])],   # §10.2 事件流
+        "min30_consistency": min30_consistency,                            # §1.10 30min 门禁
+        "macd_warmup": _jsonable(macd_warmup) if macd_warmup is not None else None,
     }
 
 
-# §11.1 顶层必备键(供 schema 完整性校验)
+# §11.1/§10.2 顶层必备键(供 schema 完整性校验)
 REQUIRED_TOP_KEYS = (
     "spec_version", "engine_version", "data_snapshot_id", "algorithm_config_hash",
     "data_health", "bi", "xianduan", "zhongshu", "beichi", "mai_mai_dian",
-    "lianli", "monitor_levels",
+    "lianli", "monitor_levels", "signal_events", "min30_consistency", "macd_warmup",
+)
+
+# 事件流每条必备字段(§0.6 通用 + §10.2 扩展)
+REQUIRED_EVENT_FIELDS = (
+    "id", "parent_id", "source_unit_ids", "level", "direction", "status",
+    "pivot_date", "pivot_price", "confirm_date", "confirm_price", "executable_price",
+    "kind", "downgraded", "beichi_grade", "supporting_signals",
 )
 
 
 def output_schema_complete(output: dict) -> bool:
-    return all(k in output for k in REQUIRED_TOP_KEYS)
+    """顶层键齐 + 买卖点含 label + 事件流每条含必备字段。"""
+    if not all(k in output for k in REQUIRED_TOP_KEYS):
+        return False
+    if not all("label" in m for m in output["mai_mai_dian"]):
+        return False
+    if not all(all(f in e for f in REQUIRED_EVENT_FIELDS) for e in output["signal_events"]):
+        return False
+    return True
 
 
 def to_json(output: dict, *, indent: int = 2) -> str:
