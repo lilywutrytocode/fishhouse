@@ -351,3 +351,52 @@ def test_three_level_nesting_real_30min_resonance():
     assert li.structure_signal == StructureSignal.RESONANCE.value
     assert li.policy.tier == "最高强度"
     assert li.min30_status == "真30min"
+
+
+# ── §9.3 锚点背驰失效(小转大):确认后价格顺原向越过 pivot → 信号失效 ─────────
+def _price_df(dates_closes, tz="Asia/Shanghai"):
+    idx = pd.DatetimeIndex([pd.Timestamp(d, tz=tz) for d, _ in dates_closes], name="date")
+    return pd.DataFrame({"close": [c for _, c in dates_closes]}, index=idx)
+
+
+def test_anchor_top_beichi_invalidated_when_price_exceeds_pivot():
+    from chanlun.cli import build_lianli_nested
+    from chanlun.structure.inclusion import UP
+    top = _mkbc("2026-02-02", "2026-02-03", "2025-11-24")     # 顶背驰 pivot 默认...
+    top.pivot_price = 336.0
+    px = _price_df([("2026-03-02", 400.0), ("2026-06-12", 506.0)])  # 后续超越 336
+    li = build_lianli_nested([(top, None, UP)], [], level="daily", price_df=px)
+    assert li.structure_signal == StructureSignal.SMALL_TO_BIG.value   # 信号失效
+    assert li.policy.stance == "hold"                                  # 持有/顺势
+    assert "持有" in li.policy.action and "减仓" not in li.policy.action.replace("撤销减仓", "")
+
+
+def test_anchor_bottom_beichi_invalidated_when_price_breaks_pivot():
+    from chanlun.cli import build_lianli_nested
+    from chanlun.structure.inclusion import DOWN
+    bot = _mkbc("2024-01-10", "2024-01-12", "2023-11-01")
+    bot.pivot_price = 50.0
+    px = _price_df([("2024-02-01", 45.0), ("2024-03-01", 40.0)])       # 后续跌破 50
+    li = build_lianli_nested([(bot, None, DOWN)], [], level="daily", price_df=px)
+    assert li.structure_signal == StructureSignal.SMALL_TO_BIG.value
+
+
+def test_anchor_not_invalidated_when_price_reverses():
+    from chanlun.cli import build_lianli_nested
+    from chanlun.structure.inclusion import UP
+    top = _mkbc("2026-02-02", "2026-02-03", "2025-11-24")
+    top.pivot_price = 336.0
+    px = _price_df([("2026-03-02", 300.0), ("2026-04-01", 280.0)])     # 反向(未越 pivot)
+    li = build_lianli_nested([(top, None, UP)], [], level="daily", price_df=px)
+    assert li.structure_signal != StructureSignal.SMALL_TO_BIG.value   # 未失效 → 本级别转折
+    assert li.structure_signal == StructureSignal.LEVEL_TURN.value
+
+
+def test_300502_right_end_anchor_beichi_invalidated():
+    from chanlun.data.loaders import load_local_csv
+    daily = load_local_csv("chanlun/data/raw/300502/300502_daily.csv", level="daily").df
+    m30 = load_local_csv("chanlun/data/raw/300502/300502_30min.csv", level="min30").df
+    o = analyze(daily, symbol="300502", min30_df=m30)
+    # 日线顶背驰 336@2026-02 被随后涨至 506 超越 → 信号失效/顺势,而非减仓
+    assert o["lianli"]["structure_signal"] == StructureSignal.SMALL_TO_BIG.value
+    assert o["lianli"]["policy"]["stance"] == "hold"

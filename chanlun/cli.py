@@ -317,14 +317,32 @@ def _time_contains(outer, inner) -> bool:
     return os_ <= ip and ic <= oe
 
 
+def _anchor_invalidated(bc, side, price_df) -> bool:
+    """§9.3 小转大/信号失效:锚点背驰 confirm 后,价格顺原趋势越过 pivot(未反向)→ 失效。
+
+    顶背驰(side=UP):confirm 后收盘超越 pivot 高点 → 失效;
+    底背驰(side=DOWN):confirm 后收盘跌破 pivot 低点 → 失效。
+    """
+    if price_df is None or bc.confirm_date is None or bc.pivot_price is None:
+        return False
+    after = price_df.loc[price_df.index > bc.confirm_date, "close"]
+    if after.empty:
+        return False
+    if side == UP:
+        return float(after.max()) > bc.pivot_price
+    return float(after.min()) < bc.pivot_price
+
+
 def build_lianli_nested(daily_tuples, weekly_tuples, *, level,
-                        min30_tuples=None, min30_consistent=True):
+                        min30_tuples=None, min30_consistent=True, price_df=None):
     """§9.2 区间套联立:以右端当前日线主背驰为锚,要求小级别背驰**时间嵌套**于大级别同向背驰段。
 
     - 周线同向主背驰的段【时间范围包含】日线背驰段 → 日嵌于周(共振候选);
       大级别当前无在进行的同向背驰(如周线最近标准背驰是 2023 旧底)→ 不嵌套 → 右端无共振。
     - 真 30min(且与日线同前复权基准)同向主背驰【嵌于日线段内】→ 三级齐 → 共振·最高强度;
       否则(30min 缺失/不一致)→ 日周共振·待30min 降一档。
+    - ★ §9.3 锚点背驰失效:confirm 后价格顺原向越过 pivot(未反向)→ 信号失效(小转大),
+      policy 撤销转折动作(持有/顺势)。
     - 无日线主背驰(仅弱信号)→ structure_signal=无,不进任何主信号动作。
     """
     min30_tuples = min30_tuples or []
@@ -337,6 +355,9 @@ def build_lianli_nested(daily_tuples, weekly_tuples, *, level,
 
     d_bc, d_side = max(d_mains, key=lambda t: t[0].confirm_date)  # 右端当前日线主背驰
     side = "bottom" if d_side == DOWN else "top"
+    # ★ 锚点背驰失效优先判定:确认后顺原向越过 pivot → 信号失效(小转大)
+    if _anchor_invalidated(d_bc, d_side, price_df):
+        return build_lianli(daily_beichi=d_bc, side=side, daily_continuation_failed=True)
     # 周线:同向标准主背驰,其段时间范围包含日线背驰段 → 嵌套
     w_bc = next((bc for bc, _z, s in weekly_tuples
                  if bc.is_main_signal and s == d_side and _time_contains(bc, d_bc)), None)
@@ -402,7 +423,7 @@ def run_pipeline(
                 min30_beichis = [bc for bc, _z, _s in min30_tuples]
     lianli = build_lianli_nested(
         beichi_tuples, weekly_tuples, level=level, min30_tuples=min30_tuples,
-        min30_consistent=(min30_consistency != "REJECT_LIANLI"))
+        min30_consistent=(min30_consistency != "REJECT_LIANLI"), price_df=df)
 
     monitor = []
     if len(df):
