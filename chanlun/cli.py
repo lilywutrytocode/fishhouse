@@ -14,7 +14,11 @@ import sys
 import pandas as pd
 
 from .config import DEFAULT_CONFIG, Config, market_of
+from .data.calendars import get_calendar
 from .data.consistency import check_consistency
+from .data.health import check_health
+from .data.models import HealthStatus
+from .data.snapshot import compute_snapshot_id
 from .data.weekly import synthesize_weekly
 from .monitor import derive_monitor_levels
 from .output import build_output, to_json
@@ -567,18 +571,149 @@ def run_pipeline(
     }
 
 
+def _resolve_market(symbol: str, market: str | None) -> str | None:
+    """显式 market 优先;否则按 SYMBOLS 反查;未知则 None(只能做长度判定)。"""
+    if market is not None:
+        return market
+    try:
+        return market_of(symbol)
+    except KeyError:
+        return None
+
+
+def _health_to_dict(hr) -> dict:
+    """§1.7 HealthReport → 顶层 data_health(诚实暴露门禁状态;不假装正常)。
+
+    ★ status 取门禁判定 OK/WARN/REJECT;无缺失但历史不足时升格暴露为 SHORT_HISTORY
+    (与 REJECT/WARN 正交:仅在本会判 OK 时才显示 SHORT_HISTORY,绝不掩盖 REJECT/WARN)。
+    """
+    base = hr.status
+    if base == HealthStatus.OK.value and hr.short_history:
+        status = "SHORT_HISTORY"
+    else:
+        status = base
+    notes: list[str] = []
+    if hr.short_history:
+        notes.append("SHORT_HISTORY·历史不足,趋势背驰/多中枢/区间套等长历史判定标低置信")
+    if hr.pre_analysis_history_unavailable:
+        notes.append("分析起点前历史不可得(pre_analysis_history_unavailable)")
+    if hr.reasons:
+        notes.append("reasons=" + ",".join(hr.reasons))
+    if hr.flags:
+        notes.append("flags=" + ",".join(hr.flags))
+
+    def _iso(d):
+        return d.isoformat() if d is not None else None
+
+    return {
+        "status": status,
+        "missing_rate": hr.missing_rate,
+        "missing_count": hr.missing_days,
+        "max_consecutive_missing": hr.max_consecutive_missing,
+        "expected_sessions": hr.expected_sessions,
+        "present_bars": hr.present_bars,
+        "bars_available": hr.bars_available,
+        "required_length": hr.required_length,
+        "analysis_start_date": _iso(hr.analysis_start_date),
+        "source_start_date": _iso(hr.source_start_date),
+        "listed_date": _iso(hr.listed_date),
+        "pre_analysis_history_unavailable": hr.pre_analysis_history_unavailable,
+        "short_history": hr.short_history,
+        "low_confidence": hr.low_confidence,
+        "rejected": hr.rejected,
+        "reasons": list(hr.reasons),
+        "flags": list(hr.flags),
+        "warnings": notes,
+        "notes": "; ".join(notes) if notes else None,
+    }
+
+
+def build_data_health(
+    df: pd.DataFrame, *, symbol: str, market: str | None, level: str = "daily",
+    config: Config = DEFAULT_CONFIG, listed_date=None, analysis_start_date=None,
+    suspended_dates=None,
+) -> dict:
+    """对输入 df 跑 §1.7 健康检查 → 顶层 data_health dict(不再为 null)。
+
+    market 可解析 → 用交易所日历判缺失;不可解析 → 仅长度/充足度判定(calendar=None)。
+    """
+    cal = get_calendar(market) if market is not None else None
+    hr = check_health(
+        df, market=market or "?", symbol=symbol, level=level, calendar=cal,
+        listed_date=listed_date, analysis_start_date=analysis_start_date,
+        suspended_dates=suspended_dates, config=config,
+    )
+    return _health_to_dict(hr)
+
+
+def build_data_snapshot(
+    df: pd.DataFrame, *, symbol: str, market: str | None, level: str = "daily",
+    source: str = "local_csv", adjust: str = "qfq",
+) -> dict:
+    """本地最小可复现快照(不联网):内容派生 data_snapshot_id + 轻量摘要(不 dump 全量)。
+
+    id 由 symbol|market|level|source(含 CSV 文件名)|adjust + 规范化内容哈希派生:
+    同份数据重跑稳定;内容/文件名/源任一变化 → id 变化;不含当前时间(可复现)。
+    """
+    snapshot_id = compute_snapshot_id(
+        df, symbol=symbol, market=market or "?", level=level,
+        source=source, adjust=adjust,
+    )
+    return {
+        "data_snapshot_id": snapshot_id,
+        "symbol": symbol,
+        "market": market,
+        "level": level,
+        "source": source,
+        "adjust": adjust,
+        "row_count": int(len(df)),
+        "first_date": df.index[0].isoformat() if len(df) else None,
+        "last_date": df.index[-1].isoformat() if len(df) else None,
+    }
+
+
 def analyze(
     df: pd.DataFrame, *, symbol: str, market: str | None = None,
     level: str = "daily", data_health=None, snapshot_meta=None,
     config: Config = DEFAULT_CONFIG, min30_df: pd.DataFrame | None = None,
+    source: str = "local_csv", adjust: str = "qfq",
+    listed_date=None, analysis_start_date=None, suspended_dates=None,
 ) -> dict:
     """规范 OHLCV → §11.1 输出 dict(完整链路 + executable_price)。
 
+    数据门禁 + 可复现快照(§1.2/§1.7)自动接入:
+    - 未显式传 ``data_health`` → 自动跑 :func:`build_data_health`,顶层 data_health 不再为 null;
+    - 自动派生内容哈希 ``data_snapshot_id`` + 轻量 ``data_snapshot`` 摘要;
+    - 健康 ``REJECT`` → 不输出 confirmed 结构(结构列表清空),只诚实给出拒算的 data_health;
+      OK/WARN/SHORT_HISTORY 正常输出(SHORT_HISTORY 标低置信,不伪装完整历史)。
+    ★ 30min 一致性 REJECT_LIANLI 仍只拒日-30min 联立,不拒单级别日线(在 run_pipeline 内处理)。
+
     ``min30_df`` 给定 → §1.10 一致基准校验后接入日-30min 区间套联立。
     """
+    mk = _resolve_market(symbol, market)
+    if data_health is None:
+        data_health = build_data_health(
+            df, symbol=symbol, market=mk, level=level, config=config,
+            listed_date=listed_date, analysis_start_date=analysis_start_date,
+            suspended_dates=suspended_dates,
+        )
+    snapshot = build_data_snapshot(
+        df, symbol=symbol, market=mk, level=level, source=source, adjust=adjust)
+
+    rejected = isinstance(data_health, dict) and data_health.get("status") == "REJECT"
+    if rejected:
+        # 数据门禁 REJECT:不输出已确认结构,只诚实暴露拒算状态(不假装正常)。
+        return build_output(
+            symbol=symbol, level=level, data_health=data_health,
+            data_snapshot=snapshot, data_snapshot_id=snapshot["data_snapshot_id"],
+            bi=[], xianduan=[], zhongshu=[], beichi=[], mai_mai_dian=[],
+            lianli=None, monitor_levels=[], signal_events=[],
+            min30_consistency=None, macd_warmup=None, config=config)
+
     r = run_pipeline(df, level=level, config=config, min30_df=min30_df, symbol=symbol)
     return build_output(
         symbol=symbol, level=level, data_health=data_health, snapshot_meta=snapshot_meta,
+        data_snapshot=snapshot, data_snapshot_id=snapshot["data_snapshot_id"],
         bi=r["bis"], xianduan=r["segments"], zhongshu=r["zhongshus"],
         beichi=r["beichis"], mai_mai_dian=r["maimaidians"], lianli=r["lianli"],
         monitor_levels=r["monitor"], signal_events=r["signal_events"],

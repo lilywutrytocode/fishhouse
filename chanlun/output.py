@@ -72,6 +72,8 @@ def build_output(
     level: str = "daily",
     data_health=None,
     snapshot_meta=None,
+    data_snapshot=None,
+    data_snapshot_id: str | None = None,
     bi: list | None = None,
     xianduan: list | None = None,
     zhongshu: list | None = None,
@@ -85,11 +87,13 @@ def build_output(
     config: Config = DEFAULT_CONFIG,
 ) -> dict:
     """组装顶层输出 dict(§11.1 + §10.2 事件流),含版本化字段。"""
-    snapshot_id = getattr(snapshot_meta, "data_snapshot_id", None)
+    # data_snapshot_id 优先用显式传入(内容派生),否则回落 snapshot_meta(§1.2)。
+    snapshot_id = data_snapshot_id or getattr(snapshot_meta, "data_snapshot_id", None)
     return {
         "spec_version": SPEC_VERSION,
         "engine_version": __version__,
         "data_snapshot_id": snapshot_id,
+        "data_snapshot": _jsonable(data_snapshot) if data_snapshot is not None else None,
         "algorithm_config_hash": algorithm_config_hash(config),
         "symbol": symbol,
         "level": level,
@@ -109,9 +113,10 @@ def build_output(
 
 # §11.1/§10.2 顶层必备键(供 schema 完整性校验)
 REQUIRED_TOP_KEYS = (
-    "spec_version", "engine_version", "data_snapshot_id", "algorithm_config_hash",
-    "data_health", "bi", "xianduan", "zhongshu", "beichi", "mai_mai_dian",
-    "lianli", "monitor_levels", "signal_events", "min30_consistency", "macd_warmup",
+    "spec_version", "engine_version", "data_snapshot_id", "data_snapshot",
+    "algorithm_config_hash", "data_health", "bi", "xianduan", "zhongshu", "beichi",
+    "mai_mai_dian", "lianli", "monitor_levels", "signal_events", "min30_consistency",
+    "macd_warmup",
 )
 
 # 事件流每条必备字段(§0.6 通用 + §10.2 扩展)

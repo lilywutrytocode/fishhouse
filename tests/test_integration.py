@@ -13,6 +13,7 @@ import pandas as pd
 
 from chanlun.cli import analyze, run_pipeline
 from chanlun.config import Config
+from chanlun.data.loaders import load_local_csv
 from chanlun.data.models import OHLCV_COLUMNS, validate_canonical
 from chanlun.data.weekly import synthesize_weekly
 from chanlun.output import output_schema_complete
@@ -540,3 +541,88 @@ def test_300502_right_end_oneshell_invalidated():
     assert sells
     # 强趋势上行,绝大多数一卖/二卖被后续更高价升破 → 失效
     assert any(m.invalidated for m in sells)
+
+
+# ── #4.5 data_health + snapshot 接入 analyze(§1.2/§1.7 数据门禁 + 可复现)─────
+def _dense_daily(n=60, start=date(2024, 1, 1)):
+    days = weekdays(start, n)
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in days], name="date").tz_localize(
+        "Asia/Shanghai")
+    c = np.linspace(10, 20, len(days))
+    return pd.DataFrame({"open": c, "high": c + 0.5, "low": c - 0.5, "close": c,
+                         "volume": 1.0, "amount": 1.0}, index=idx)
+
+
+def test_snapshot_id_stable_across_reruns():
+    """同一份数据重跑 → data_snapshot_id 稳定(不含当前时间)。"""
+    df = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df
+    o1 = analyze(df, symbol="300502", source="300502_daily_long.csv")
+    o2 = analyze(df.copy(), symbol="300502", source="300502_daily_long.csv")
+    assert o1["data_snapshot_id"]
+    assert o1["data_snapshot_id"] == o2["data_snapshot_id"]
+
+
+def test_snapshot_id_changes_when_content_changes():
+    """CSV 内容改一行 → data_snapshot_id 改变。"""
+    df = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df
+    o1 = analyze(df, symbol="300502", source="300502_daily_long.csv")
+    df2 = df.copy()
+    df2.iloc[10, df2.columns.get_loc("close")] += 0.01
+    o2 = analyze(df2, symbol="300502", source="300502_daily_long.csv")
+    assert o1["data_snapshot_id"] != o2["data_snapshot_id"]
+
+
+def test_analyze_emits_data_health_not_null():
+    """analyze 顶层 data_health 不再为 null,含规格要求的字段。"""
+    df = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df
+    out = analyze(df, symbol="300502", source="300502_daily_long.csv")
+    h = out["data_health"]
+    assert h is not None
+    for f in ("status", "missing_rate", "missing_count", "analysis_start_date",
+              "source_start_date", "listed_date", "pre_analysis_history_unavailable",
+              "warnings"):
+        assert f in h
+    assert h["status"] in ("OK", "WARN", "REJECT", "SHORT_HISTORY")
+    assert h["listed_date"] is None       # 本地 CSV 无上市日 → null(诚实)
+
+
+def test_healthy_ok_sample_still_outputs_structures():
+    """健康 OK 长样本仍正常输出结构(门禁不误伤)。"""
+    df = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df
+    out = analyze(df, symbol="300502", source="300502_daily_long.csv")
+    assert out["data_health"]["status"] == "OK"
+    assert len(out["bi"]) >= 1 and len(out["mai_mai_dian"]) >= 1
+
+
+def test_short_history_not_disguised_as_full():
+    """SHORT_HISTORY 样本不伪装成完整历史:显式标 short_history + 低置信,但仍输出。"""
+    df = load_local_csv("chanlun/data/300502_daily.csv", level="daily").df
+    out = analyze(df, symbol="300502", source="300502_daily.csv")
+    h = out["data_health"]
+    assert h["status"] == "SHORT_HISTORY"
+    assert h["short_history"] is True and h["low_confidence"] is True
+    assert len(out["bi"]) >= 1            # SHORT_HISTORY 允许输出
+
+
+def test_reject_sample_emits_no_confirmed_structures():
+    """连续缺 ≥3 → REJECT:不输出 confirmed 结构,但仍诚实给出 health + snapshot。"""
+    df = _dense_daily(60)
+    keep = list(range(0, 25)) + list(range(40, 60))   # 中间挖掉 ~10 连续交易日
+    df = df.iloc[keep]
+    out = analyze(df, symbol="300502", level="daily")
+    assert out["data_health"]["status"] == "REJECT"
+    assert out["data_health"]["rejected"] is True
+    assert out["bi"] == [] and out["mai_mai_dian"] == [] and out["signal_events"] == []
+    assert out["data_snapshot_id"]        # 快照仍出(可复现地记录被拒数据)
+    from chanlun.output import output_schema_complete
+    assert output_schema_complete(out)
+
+
+def test_min30_reject_lianli_does_not_reject_daily():
+    """§1.10:30min 与日线基准不一致 REJECT_LIANLI,仍不拒单级别日线分析。"""
+    daily = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df  # 基准 B
+    m30 = load_local_csv("chanlun/data/300502_30min.csv", level="min30").df          # 基准 A
+    out = analyze(daily, symbol="300502", min30_df=m30, source="300502_daily_long.csv")
+    assert out["data_health"]["status"] == "OK"        # 日线数据本身健康
+    assert len(out["bi"]) >= 1                          # 日线结构照常输出
+    assert out["min30_consistency"] == "REJECT_LIANLI"  # 仅拒日-30min 联立
