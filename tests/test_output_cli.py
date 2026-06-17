@@ -128,3 +128,62 @@ def test_zhongshu_serialized_with_zg_zd_gg_dd():
     z = out["zhongshu"][0]
     for f in ("ZG", "ZD", "GG", "DD", "n_segments", "source_unit_ids", "parent_id"):
         assert f in z
+
+
+# ── Patch A:信号分级 + report 降噪 ───────────────────────────────────────────
+def _load_000001():
+    from chanlun.data.loaders import load_local_csv
+    return load_local_csv(
+        "chanlun/data/raw/000001/000001_sh_daily_20170601_20190630_ohlcv.csv",
+        level="daily").df
+
+
+def test_signal_quality_ranking_000001():
+    out = analyze(_load_000001(), symbol="000001",
+                  source="000001_sh_daily_20170601_20190630_ohlcv.csv")
+    events = out["signal_events"]
+
+    # 2019-01-04 一买·标准 → S 级 primary
+    fb = next(e for e in events if str(e.get("pivot_date"))[:10] == "2019-01-04")
+    assert fb["signal_quality"] == "S" and fb["signal_role"] == "primary"
+    assert fb["display_priority"] == 100 and fb["trade_comment"]
+
+    # 2019-03-14 附近二买/三买重合 → A 级 / secondary
+    overlap = [e for e in events if str(e.get("pivot_date"))[:10] == "2019-03-14"
+               and e["kind"] in ("二买", "三买")]
+    assert overlap
+    assert all(e["signal_quality"] == "A" and e["signal_role"] == "secondary"
+               for e in overlap)
+
+    # DIF/面积弱背驰类信号不高于 C(S/A/B 之上不得出现弱档)
+    from chanlun.output import SIGNAL_QUALITY_RANK as R
+    for e in events:
+        if e.get("beichi_grade") in ("DIF背驰", "面积背驰") and not e.get("invalidated"):
+            # 弱档(非重合提级、非承标准的二三类)应 ≤ C
+            if not (e["kind"] in ("二买", "二卖", "三买", "三卖")
+                    and (e.get("overlap_2_3") or e.get("signal_quality") == "A")):
+                assert R[e["signal_quality"]] <= R["C"]
+
+
+def test_report_hides_weak_signals_by_default():
+    out = analyze(_load_000001(), symbol="000001",
+                  source="000001_sh_daily_20170601_20190630_ohlcv.csv")
+    events = out["signal_events"]
+    weak = [e for e in events if e["signal_quality"] in ("C", "D")]
+    assert weak, "000001 样本应含 C/D 弱信号(用于验证降噪)"
+
+    default = format_report(out)                       # 默认 min_quality=B
+    verbose = format_report(out, verbose_signals=True)
+
+    # 默认:弱信号统计存在,但 C/D 不逐条展示其 pivot 明细
+    assert "弱信号统计:" in default
+    assert "详细列表请使用 --verbose-signals 查看" in default
+    weak_lines_default = sum(
+        1 for e in weak
+        if f"[{e['signal_quality']}] {str(e.get('pivot_date'))[:10]}" in default)
+    assert weak_lines_default == 0                     # 默认不逐条展示 C/D
+
+    # verbose:全部弱信号逐条展开
+    assert all(
+        f"[{e['signal_quality']}] {str(e.get('pivot_date'))[:10]}" in verbose
+        for e in weak)

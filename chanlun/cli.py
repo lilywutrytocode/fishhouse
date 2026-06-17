@@ -21,7 +21,7 @@ from .data.models import HealthStatus
 from .data.snapshot import compute_snapshot_id
 from .data.weekly import synthesize_weekly
 from .monitor import derive_monitor_levels
-from .output import build_output, to_json
+from .output import SIGNAL_QUALITY_RANK, build_output, to_json
 from .structure.beichi import (
     BeichiType,
     SegEnergy,
@@ -721,8 +721,30 @@ def analyze(
         config=config)
 
 
-def format_report(output: dict) -> str:
-    """可读报告(§11.3)。"""
+def _ev_date(e) -> str:
+    """事件展示用日期(pivot_date 取前 10 位)。"""
+    return str(e.get("pivot_date") or "")[:10]
+
+
+def _fmt_signal(e) -> str:
+    note = "二买/三买重合 " if e.get("overlap_2_3") else ""
+    label = e.get("label") or (f"{e.get('kind')}·{e['subkind']}"
+                               if e.get("subkind") else e.get("kind"))
+    return (f"[{e.get('signal_quality')}] {_ev_date(e)} "
+            f"{label} {note}"
+            f"pivot={e.get('pivot_price')} confirm={str(e.get('confirm_date') or '')[:10]} "
+            f"executable={e.get('executable_price')}")
+
+
+def format_report(output: dict, *, min_quality: str = "B",
+                  verbose_signals: bool = False) -> str:
+    """可读报告(§11.3)。三段:A 主信号 / B 监控位 / C 弱信号统计。
+
+    默认只逐条展示达到 ``min_quality``(默认 B,即 S/A/B)的信号;C/D 仅计数,
+    ``--verbose-signals``(verbose_signals=True)才逐条展开全部弱信号/已失效信号。
+    """
+    rank = SIGNAL_QUALITY_RANK
+    min_rank = rank.get(min_quality, rank["B"])
     lines = [
         f"标的: {output['symbol']}  级别: {output['level']}",
         f"spec={output['spec_version']} engine={output['engine_version']} "
@@ -742,18 +764,42 @@ def format_report(output: dict) -> str:
         lines.append(f"右端未确认笔: {[b['id'] for b in pending_bi]}")
     if pending_xd:
         lines.append(f"右端未确认线段: state={[s['state'] for s in pending_xd]}")
-    for m in output["mai_mai_dian"]:
-        lines.append(f"买卖点 {m.get('label') or m['kind']} "
-                     f"pivot={m['pivot_price']}({m.get('pivot_relation_to_zhongshu')}) "
-                     f"confirm={m.get('confirm_relation_to_zhongshu')} "
-                     f"executable={m['executable_price']} is_main={m.get('is_main')} "
-                     f"status={m['status']}")
+
+    events = output.get("signal_events") or []
+    shown = [e for e in events
+             if verbose_signals or rank.get(e.get("signal_quality"), 0) >= min_rank]
+
+    # A. 主信号摘要(S/A 逐条;默认还含 B;verbose 含全部 shown)
+    primary = [e for e in shown if e.get("signal_quality") in ("S", "A")]
+    others = [e for e in shown if e.get("signal_quality") not in ("S", "A")]
+    lines.append("主信号:")
+    if primary:
+        lines += [f"  {_fmt_signal(e)}" for e in primary]
+    else:
+        lines.append("  (无 S/A 级主信号)")
+    if others:
+        lines.append("其他展示信号:")
+        lines += [f"  {_fmt_signal(e)}" for e in others]
+
+    # B. 当前有效监控位(保留现有 monitor_levels)
+    lines.append("监控位:")
     if output["zhongshu"]:
         z = output["zhongshu"][-1]
-        lines.append(f"最近中枢 [{z['ZD']}, {z['ZG']}] GG={z['GG']} DD={z['DD']} "
+        lines.append(f"  最近中枢 [{z['ZD']}, {z['ZG']}] GG={z['GG']} DD={z['DD']} "
                      f"段数={z['n_segments']} extending={z['extending']}")
     for m in output["monitor_levels"]:
-        lines.append(f"监控位 [{m['tier']}] {m['price']} — {m['hint']}")
+        lines.append(f"  [{m['tier']}] {m['price']} — {m['hint']}")
+
+    # C. 弱信号统计(默认只计数,不逐条)
+    nB = sum(1 for e in events if e.get("signal_quality") == "B")
+    nC = sum(1 for e in events if e.get("signal_quality") == "C")
+    nD = sum(1 for e in events if e.get("signal_quality") == "D")
+    lines.append("弱信号统计:")
+    lines.append(f"  B级标准盘背: {nB} 个")
+    lines.append(f"  C级 DIF/面积弱背驰: {nC} 个")
+    lines.append(f"  D级已失效/噪音信号: {nD} 个")
+    if not verbose_signals and (nC or nD):
+        lines.append("  详细列表请使用 --verbose-signals 查看")
     return "\n".join(lines)
 
 
@@ -763,6 +809,10 @@ def main(argv=None) -> int:
     p.add_argument("--level", default="daily", choices=["daily", "weekly", "min30"])
     p.add_argument("--csv", help="规范 OHLCV CSV 路径(离线);省略则尝试在线拉取")
     p.add_argument("--json-only", action="store_true", help="只打印 JSON")
+    p.add_argument("--signal-min-quality", default="B", choices=["S", "A", "B", "C", "D"],
+                   help="报告逐条展示的最低信号等级(默认 B:展示 S/A/B)")
+    p.add_argument("--verbose-signals", action="store_true",
+                   help="逐条展开全部弱信号/已失效信号(C/D)")
     args = p.parse_args(argv)
 
     try:
@@ -782,7 +832,9 @@ def main(argv=None) -> int:
     output = analyze(df, symbol=args.symbol, market=market, level=args.level)
     print(to_json(output))
     if not args.json_only:
-        print("\n" + format_report(output), file=sys.stderr)
+        print("\n" + format_report(
+            output, min_quality=args.signal_min_quality,
+            verbose_signals=args.verbose_signals), file=sys.stderr)
     return 0
 
 
