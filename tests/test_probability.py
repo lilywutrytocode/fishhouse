@@ -56,8 +56,9 @@ def test_backtest_uses_only_confirm_and_executable():
     assert len(triggers) == 1                            # 待确认事件被剔除,不进回测
     t = triggers[0]
     assert set(t.keys()) == {"id", "confirm_date", "executable_price",
-                             "direction", "downgraded"}
+                             "direction", "downgraded", "invalidated"}
     assert "pivot" not in t and "pivot_price" not in t   # ★ 不含 pivot
+    assert t["invalidated"] is False                     # 结果标志,默认未失效
 
 
 def test_run_backtest_reserved():

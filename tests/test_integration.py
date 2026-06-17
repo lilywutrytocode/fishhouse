@@ -473,3 +473,70 @@ def test_300502_second_third_inherit_is_main_in_event_stream():
         # 与某个同向更早一买的强度一致(锚点继承)
     # 至少有一个继承到 is_main=True(来自标准一买)或 strength 字段非空
     assert any(m.strength is not None for m in seconds_thirds)
+
+
+# ── #4 失效信号结果字段(§9.3 每信号 invalidated;结果字段,不删样本)─────────────
+def test_signal_invalidated_is_result_field_not_exclusion():
+    """买点 confirm 后跌破 pivot 低 → invalidated=True;卖点升破 pivot 高 → True。
+    ★ 失效信号仍进事件流/回测触发,只标结果,不剔除样本。"""
+    from chanlun.cli import _signal_invalidated
+    from chanlun.structure.maimaidian import MaiMaiDian
+
+    base = pd.Timestamp("2024-01-01", tz="Asia/Shanghai")
+    idx = pd.date_range(base, periods=10, freq="D", tz="Asia/Shanghai")
+
+    # 买点 pivot 低 10.0,confirm 后收盘跌到 9.0 → 失效
+    df_break = pd.DataFrame({"close": [10, 10, 11, 12, 11, 10.5, 9.0, 9.5, 10, 11]}, index=idx)
+    buy_broken = MaiMaiDian(kind="一买", side="buy", level="daily", status="背驰确认", subkind=None,
+        pivot_date=idx[2], pivot_price=10.0, confirm_date=idx[3], confirm_price=12.0,
+        executable_price=12.1, id="b1")
+    assert _signal_invalidated(buy_broken, df_break) is True
+
+    # 买点 pivot 低 10.0,confirm 后始终在上方 → 持有(未失效)
+    df_hold = pd.DataFrame({"close": [10, 10, 11, 12, 13, 14, 13, 14, 15, 16]}, index=idx)
+    buy_held = MaiMaiDian(kind="一买", side="buy", level="daily", status="背驰确认", subkind=None,
+        pivot_date=idx[2], pivot_price=11.0, confirm_date=idx[3], confirm_price=12.0,
+        executable_price=12.1, id="b2")
+    assert _signal_invalidated(buy_held, df_hold) is False
+
+    # 卖点 pivot 高 14.0,confirm 后升破 → 失效
+    sell_broken = MaiMaiDian(kind="一卖", side="sell", level="daily", status="背驰确认", subkind=None,
+        pivot_date=idx[5], pivot_price=14.0, confirm_date=idx[6], confirm_price=13.0,
+        executable_price=12.9, id="s1")
+    assert _signal_invalidated(sell_broken, df_hold) is True
+
+    # 右端无后续 bar(confirm_date 即末根)→ 默认未失效(不臆测)
+    last = MaiMaiDian(kind="一买", side="buy", level="daily", status="背驰确认", subkind=None,
+        pivot_date=idx[8], pivot_price=15.0, confirm_date=idx[9], confirm_price=16.0,
+        executable_price=16.1, id="b3")
+    assert _signal_invalidated(last, df_hold) is False
+
+
+def test_invalidated_flows_to_event_and_trigger():
+    """invalidated 落到 signal_event 与 backtest trigger,且失效样本不被剔除。"""
+    from chanlun.data.loaders import load_local_csv
+    df = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df
+    r = run_pipeline(df, symbol="300502")
+    mmds = r["maimaidians"]
+    assert any(m.invalidated for m in mmds)        # 真实样本里确有失效信号
+    events = r["signal_events"]
+    triggers = to_backtest_triggers(events)
+    assert triggers
+    # 触发里含 invalidated 标志
+    assert all("invalidated" in t for t in triggers)
+    # 失效事件仍在触发列表(结果字段,不剔除)
+    inval_event_ids = {e.id for e in events if e.invalidated}
+    if inval_event_ids:
+        trig_ids = {t["id"] for t in triggers}
+        assert inval_event_ids & trig_ids
+
+
+def test_300502_right_end_oneshell_invalidated():
+    """300502 一卖 pivot 后价格继续上行 → invalidated=True(顺原向越过 pivot)。"""
+    from chanlun.data.loaders import load_local_csv
+    df = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily").df
+    r = run_pipeline(df, symbol="300502")
+    sells = [m for m in r["maimaidians"] if m.side == "sell" and m.confirm_date is not None]
+    assert sells
+    # 强趋势上行,绝大多数一卖/二卖被后续更高价升破 → 失效
+    assert any(m.invalidated for m in sells)

@@ -42,6 +42,7 @@ class SignalEventRecord:
     kind: str | None = None
     subkind: str | None = None
     downgraded: bool = False
+    invalidated: bool = False
     beichi_grade: str | None = None
     related_zhongshu_id: str | None = None
     related_beichi_id: str | None = None
@@ -72,6 +73,7 @@ def to_signal_event(
         confirm_date=mmd.confirm_date, confirm_price=mmd.confirm_price,
         executable_price=mmd.executable_price,
         kind=mmd.kind, subkind=mmd.subkind, downgraded=downgraded,
+        invalidated=getattr(mmd, "invalidated", False),
         beichi_grade=beichi_grade,
         related_zhongshu_id=mmd.related_zhongshu_id,
         related_beichi_id=mmd.related_beichi_id,
@@ -111,6 +113,7 @@ def to_backtest_triggers(events: list[SignalEventRecord]) -> list[dict]:
             "id": e.id, "confirm_date": e.confirm_date,
             "executable_price": e.executable_price, "direction": e.direction,
             "downgraded": e.downgraded,
+            "invalidated": getattr(e, "invalidated", False),  # 结果标志,非剔除条件
         })
     return triggers
 

@@ -376,6 +376,22 @@ def _anchor_invalidated(bc, side, price_df) -> bool:
     return float(after.min()) < bc.pivot_price
 
 
+def _signal_invalidated(m, price_df) -> bool:
+    """§9.3 每信号失效:confirm 后价格顺原趋势越过该买卖点 pivot(反转未成)。
+
+    买点(buy):后续收盘**跌破** pivot 低点 → 失效;卖点(sell):**升破** pivot 高点 → 失效。
+    ★ 仅作结果字段,不从事件流/回测触发剔除(实盘右端可隐藏,回测全计入)。
+    """
+    if m.confirm_date is None or m.pivot_price is None:
+        return False
+    after = price_df.loc[price_df.index > m.confirm_date, "close"]
+    if after.empty:
+        return False
+    if m.side == "buy":
+        return float(after.min()) < m.pivot_price
+    return float(after.max()) > m.pivot_price
+
+
 def build_lianli_nested(daily_tuples, weekly_tuples, *, level,
                         min30_tuples=None, min30_consistent=True, price_df=None):
     """§9.2 区间套联立:以右端当前日线主背驰为锚,要求小级别背驰**时间嵌套**于大级别同向背驰段。
@@ -495,6 +511,8 @@ def run_pipeline(
 
     maimaidians = [m for m in maimaidians if not _confirm_in_warmup(m)]
     assign_ids(maimaidians, level=level)
+    for m in maimaidians:                          # §9.3 每信号失效结果字段(不删样本)
+        m.invalidated = _signal_invalidated(m, df)
 
     # §1.9 周线由日线合成 + §1.10 30min 一致性门禁 + §9.2 区间套联立
     weekly_tuples = []

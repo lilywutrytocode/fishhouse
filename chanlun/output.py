@@ -118,7 +118,7 @@ REQUIRED_TOP_KEYS = (
 REQUIRED_EVENT_FIELDS = (
     "id", "parent_id", "source_unit_ids", "level", "direction", "status",
     "pivot_date", "pivot_price", "confirm_date", "confirm_price", "executable_price",
-    "kind", "downgraded", "beichi_grade", "supporting_signals",
+    "kind", "downgraded", "invalidated", "beichi_grade", "supporting_signals",
 )
 
 

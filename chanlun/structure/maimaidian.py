@@ -97,6 +97,7 @@ class MaiMaiDian:
     beichi_grade: str | None = None     # 标准背驰/面积背驰/DIF背驰
     strength: str | None = None         # 标准(建立在标准档背驰)/ 弱(仅面积/DIF档)
     is_main: bool = False               # 仅标准档背驰之上的一买为主买点
+    invalidated: bool = False           # §9.3 小转大/失效:confirm 后顺原向越过 pivot(结果字段,不删样本)
     label: str | None = None            # 显示标签(__post_init__ 计算)
     id: str | None = None
 
