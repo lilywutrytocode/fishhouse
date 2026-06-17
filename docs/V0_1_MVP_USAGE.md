@@ -52,8 +52,8 @@ python3 scripts/show_events.py out_000001.json
 | --- | --- | --- |
 | `chanlun/data/raw/000001/000001_sh_daily_20170601_20190630_ohlcv.csv` | **OK** | 默认 demo,标准趋势底背驰 |
 | `chanlun/data/raw/300750/300750_qfq_daily_20210101_20230731.csv` | OK | 弱档趋势背驰样本 |
-| `chanlun/data/300502_daily_long.csv` | OK(2047 根) | 强趋势股:趋势背驰 0 次,多数信号后续 `invalidated=True`;**不适合**当「典型背驰」demo,但 data_health 不拒 |
-| `chanlun/data/300502_daily.csv` | **SHORT_HISTORY** | 228 根历史不足 → 低置信,仍输出但长历史判定不可全信 |
+| `chanlun/data/raw/300502/300502_daily_long.csv` | OK(2047 根) | 强趋势股:趋势背驰 0 次,多数信号后续 `invalidated=True`;**不适合**当「典型背驰」demo,但 data_health 不拒 |
+| `chanlun/data/raw/300502/300502_daily_short.csv` | **SHORT_HISTORY** | 228 根历史不足 → 低置信,仍输出但长历史判定不可全信 |
 
 > 校正:`300502_daily_long.csv` 当前**不会**被 data_health REJECT(缺失率 0、无连续缺失)。
 > data_health **REJECT** 只在「连续缺 ≥3 交易日」或「缺失率 >5%」时触发;REJECT 时引擎

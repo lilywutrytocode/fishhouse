@@ -71,7 +71,7 @@ def test_ohlcv_only_has_no_crosscheck(tmp_path):
 
 def test_real_300502_long_loads(tmp_path):
     # 真实文件 smoke:长日线规范加载(无 MACD 列)
-    res = load_local_csv("chanlun/data/300502_daily_long.csv", level="daily")
+    res = load_local_csv("chanlun/data/raw/300502/300502_daily_long.csv", level="daily")
     assert res.df.shape[1] == 6
     validate_canonical(res.df)
     assert res.cross_check is None
