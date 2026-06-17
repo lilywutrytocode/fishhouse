@@ -18,6 +18,7 @@ import pandas as pd
 from ..config import DEFAULT_CONFIG, Config
 from .calendars import TradingCalendar
 from .models import (
+    FLAG_APPROX_CALENDAR_WEEKDAY,
     FLAG_LISTED_DATE_UNKNOWN,
     FLAG_PRE_ANALYSIS_HISTORY_UNAVAILABLE,
     FLAG_SHORT_HISTORY,
@@ -98,6 +99,7 @@ def check_health(
     suspended_set = {d for d in (suspended_dates or []) if d >= analysis_start_date}
 
     # ── 缺失判定(需日历)────────────────────────────────────────────────
+    approximate = getattr(calendar, "name", None) == "weekday"
     if calendar is not None:
         sessions = [
             d for d in calendar.sessions(analysis_start_date, end_date)
@@ -117,12 +119,23 @@ def check_health(
                 run += 1
                 max_consec = max(max_consec, run)
 
-        if max_consec >= config.missing_consecutive_reject:
-            reasons.append(REASON_CONSEC_MISSING)
-        if missing_rate > config.missing_rate_reject:
-            reasons.append(REASON_MISSING_RATE)
-        if missing_days and not reasons:
-            reasons.append(REASON_HAS_MISSING)
+        if approximate:
+            # ★ weekday 兜底日历(无真实 A 股交易日历):节假日会被误算为缺失,
+            # 故只对"明显异常"REJECT,正常假期缺口降为 WARN(标 APPROX_CALENDAR_WEEKDAY)。
+            flags.append(FLAG_APPROX_CALENDAR_WEEKDAY)
+            if max_consec > config.approx_consec_reject:
+                reasons.append(REASON_CONSEC_MISSING)
+            if missing_rate > config.approx_missing_rate_reject:
+                reasons.append(REASON_MISSING_RATE)
+            if missing_days and not reasons:
+                reasons.append(REASON_HAS_MISSING)
+        else:
+            if max_consec >= config.missing_consecutive_reject:
+                reasons.append(REASON_CONSEC_MISSING)
+            if missing_rate > config.missing_rate_reject:
+                reasons.append(REASON_MISSING_RATE)
+            if missing_days and not reasons:
+                reasons.append(REASON_HAS_MISSING)
     else:
         expected_sessions = bars_available
         missing_days = 0

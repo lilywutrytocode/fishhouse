@@ -87,6 +87,9 @@ class Config:
     # §1.7 缺失判定
     missing_consecutive_reject: int = 3   # 连续缺 ≥ 3 交易日 → REJECT
     missing_rate_reject: float = 0.05      # 总缺失率 > 5% → REJECT
+    # weekday 兜底日历(无真实交易日历)专用宽松阈值:节假日缺口不误杀,仅明显异常 REJECT
+    approx_consec_reject: int = 10         # 连续缺 > 10 交易日(估算)→ REJECT
+    approx_missing_rate_reject: float = 0.20  # 缺失率 > 20% → REJECT
 
     def macd_warmup_bars(self) -> int:
         """EMA 暖机根数 = factor × macd_slow(默认 5×26 = 130)。"""

@@ -636,8 +636,10 @@ def build_data_health(
     """对输入 df 跑 §1.7 健康检查 → 顶层 data_health dict(不再为 null)。
 
     market 可解析 → 用交易所日历判缺失;不可解析 → 仅长度/充足度判定(calendar=None)。
+    ★ 仅 daily 用日线交易日历;min30 等不套日线 session 缺失逻辑(calendar=None),
+    避免把节假日/休市日误判为缺失而 REJECT(分钟线时间戳升序/去重由加载期 §1.6 保证)。
     """
-    cal = get_calendar(market) if market is not None else None
+    cal = get_calendar(market) if (market is not None and level == "daily") else None
     hr = check_health(
         df, market=market or "?", symbol=symbol, level=level, calendar=cal,
         listed_date=listed_date, analysis_start_date=analysis_start_date,
@@ -752,6 +754,14 @@ def format_report(output: dict, *, min_quality: str = "B",
         lines.append(
             "TDX raw data; suitable for short-cycle confirmation; "
             "use qfq source for long-cycle daily/weekly structure when available.")
+    health = output.get("data_health") or {}
+    if health.get("status") == "REJECT":       # 数据门禁:明确说明,避免误以为"无结构"
+        reasons = ", ".join(health.get("reasons") or []) or "未知"
+        lines += [
+            "数据门禁: REJECT",
+            f"原因: {reasons}",
+            "说明: 数据被门禁拦截，后续笔/线段/中枢/背驰/买卖点不会输出。",
+        ]
     lines += [
         f"标的: {output['symbol']}  级别: {output['level']}",
         f"spec={output['spec_version']} engine={output['engine_version']} "
