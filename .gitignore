@@ -14,3 +14,4 @@ venv/
 *.parquet
 out_*.json
 report_*.txt
+outputs/

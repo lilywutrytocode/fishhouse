@@ -666,6 +666,7 @@ def build_data_snapshot(
         "level": level,
         "source": source,
         "adjust": adjust,
+        "confidence": "lower_than_qfq_daily" if adjust == "raw" else "qfq",
         "row_count": int(len(df)),
         "first_date": df.index[0].isoformat() if len(df) else None,
         "last_date": df.index[-1].isoformat() if len(df) else None,
@@ -745,7 +746,13 @@ def format_report(output: dict, *, min_quality: str = "B",
     """
     rank = SIGNAL_QUALITY_RANK
     min_rank = rank.get(min_quality, rank["B"])
-    lines = [
+    lines = []
+    snap = output.get("data_snapshot") or {}
+    if snap.get("adjust") == "raw":            # raw 数据顶部提示(不改降噪分组)
+        lines.append(
+            "TDX raw data; suitable for short-cycle confirmation; "
+            "use qfq source for long-cycle daily/weekly structure when available.")
+    lines += [
         f"标的: {output['symbol']}  级别: {output['level']}",
         f"spec={output['spec_version']} engine={output['engine_version']} "
         f"config_hash={output['algorithm_config_hash']}",

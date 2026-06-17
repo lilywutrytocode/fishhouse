@@ -19,6 +19,7 @@ sources = [
     "akshare",
     "yfinance",
     "exchange_calendars",
+    "pytdx",  # 通达信短周期(min30/分时)源
 ]
 test = [
     "pytest>=7",
